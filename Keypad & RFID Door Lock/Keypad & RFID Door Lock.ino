@@ -1,7 +1,8 @@
 // Tiền linh kiện tầm 170k
 // Kết nối phần cứng:
 // - 4x4 Keypad: D2, D3, D4, D5, D6, A0, A1, A2
-// - I2C LCD: SDA-A4, SCL-A5
+// - I2C LCD: SDA-A4, SCL-A5 
+
 // - RFID: SDA-D10, SCK-D13, MOSI-D11, MISO-D12, RST-D9
 // - relay 1-D8, relay 2-7
 
