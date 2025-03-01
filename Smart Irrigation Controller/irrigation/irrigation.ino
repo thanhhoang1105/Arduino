@@ -81,7 +81,10 @@ bool backupConfig[10];  // lưu cấu hình trước khi thay đổi
 int configSelected = 0; // béc hiện được chọn
 
 // TIME_SELECT_MENU:
-unsigned int irrigationTime = 120; // thời gian tưới mỗi béc (phút), mặc định 120 = 2 giờ
+unsigned int irrigationTime = 1; // thời gian tưới mỗi béc (phút), mặc định 120 = 2 giờ
+
+// define time tăng giảm
+#define TIME_STEP 1
 
 // RUNNING:
 unsigned long runStartTime = 0;
@@ -126,8 +129,19 @@ void updateMenuDisplay()
     display.setCursor(0, y);
     display.println("CAU HINH:");
     y += 16;
-    for (int i = 0; i < 10; i++)
+    // Số dòng cấu hình hiển thị được (màn hình 64px - 16px header = 48px, mỗi dòng 16px → 3 dòng)
+    int configScrollOffset = 0;
+    const int maxVisible = 3; // Số dòng cấu hình hiển thị được
+    // Cập nhật configScrollOffset sao cho configSelected luôn nằm trong vùng hiển thị
+    if (configSelected < configScrollOffset)
+      configScrollOffset = configSelected;
+    if (configSelected > configScrollOffset + maxVisible - 1)
+      configScrollOffset = configSelected - (maxVisible - 1);
+
+    // In các mục cấu hình từ configScrollOffset đến configScrollOffset+maxVisible-1
+    for (int i = configScrollOffset; i < 10 && i < configScrollOffset + maxVisible; i++)
     {
+      display.setCursor(0, y);
       if (i == configSelected)
         display.print(">");
       else
@@ -138,7 +152,7 @@ void updateMenuDisplay()
       display.println(allowedSprinklers[i] ? "ON" : "OFF");
       y += 16;
     }
-    // Hiển thị hướng dẫn: *: Cancel, #: Save, LEFT: Back
+    // Hiển thị hướng dẫn ở cuối danh sách
     display.setCursor(0, y);
     display.println("*: Cancel  #: Save");
     break;
@@ -170,8 +184,9 @@ void updateMenuDisplay()
       unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
       unsigned int rh = remain / 3600;
       unsigned int rm = (remain % 3600) / 60;
-      char timeStr[6];
-      sprintf(timeStr, "%02u:%02u", rh, rm);
+      unsigned int rs = remain % 60;                  // Thêm giây
+      char timeStr[9];                                // Tăng kích thước buffer để chứa thêm giây
+      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs); // Thêm %02u cho giây
       display.setCursor(0, y);
       display.print("Con lai: ");
       display.println(timeStr);
@@ -275,7 +290,7 @@ void processIRRemote()
         {
           if (mainMenuSelection == 0)
           {
-            // Trước khi vào CONFIG_MENU, backup cấu hình hiện tại
+            // Backup cấu hình hiện tại trước khi vào config
             for (int i = 0; i < 10; i++)
             {
               backupConfig[i] = allowedSprinklers[i];
@@ -304,19 +319,9 @@ void processIRRemote()
         {
           allowedSprinklers[configSelected] = !allowedSprinklers[configSelected];
         }
-        else if (cmd == "LEFT")
+        else if (cmd == "LEFT" || cmd == "STAR")
         {
-          // Quay lại MAIN_MENU mà không lưu thay đổi (hủy)
-          // Khôi phục cấu hình từ backup:
-          for (int i = 0; i < 10; i++)
-          {
-            allowedSprinklers[i] = backupConfig[i];
-          }
-          currentMenu = MAIN_MENU;
-        }
-        else if (cmd == "STAR")
-        { // Nếu bạn muốn dùng STAR để hủy
-          // Hủy cấu hình (khôi phục backup) và quay lại MAIN_MENU
+          // Hủy cấu hình: khôi phục backup và quay lại MAIN_MENU
           for (int i = 0; i < 10; i++)
           {
             allowedSprinklers[i] = backupConfig[i];
@@ -324,7 +329,8 @@ void processIRRemote()
           currentMenu = MAIN_MENU;
         }
         else if (cmd == "HASH")
-        { // Dùng HASH để lưu cấu hình
+        {
+          // Lưu cấu hình và quay lại MAIN_MENU
           currentMenu = MAIN_MENU;
         }
       }
@@ -332,16 +338,16 @@ void processIRRemote()
       {
         if (cmd == "UP")
         {
-          irrigationTime += 5;
+          irrigationTime += TIME_STEP; // tăng 15 phút
         }
         else if (cmd == "DOWN")
         {
-          if (irrigationTime > 5)
-            irrigationTime -= 5;
+          if (irrigationTime > TIME_STEP)
+            irrigationTime -= TIME_STEP;
         }
         else if (cmd == "OK")
         {
-          // Xác nhận thời gian, chuyển sang RUNNING
+          // Tạo danh sách các béc được bật theo cấu hình
           runSprinklerCount = 0;
           for (int i = 0; i < 10; i++)
           {
@@ -352,7 +358,12 @@ void processIRRemote()
           }
           if (runSprinklerCount == 0)
           {
-            Serial.println("Chua chon bec nao!");
+            // Hiển thị lỗi trên OLED khi chưa bật béc nào
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("CHUA BAT BEC NAO");
+            display.display();
+            delay(2000);
             currentMenu = MAIN_MENU;
           }
           else
@@ -383,7 +394,6 @@ void processIRRemote()
       {
         if (cmd == "LEFT")
         {
-          // Hủy chu trình: tắt tất cả relay, quay lại MAIN_MENU
           for (int i = 0; i < 12; i++)
           {
             digitalWrite(relayPins[i], LOW);
