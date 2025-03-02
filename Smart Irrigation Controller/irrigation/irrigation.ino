@@ -83,24 +83,21 @@ int mainMenuSelection = 0;
 // CONFIG_MENU: cấu hình 10 béc tưới (index 0->9)
 bool allowedSprinklers[10];
 bool backupConfig[10];  // backup cấu hình khi vào CONFIG_MENU
-int configSelected = 0; // béc hiện được chọn
-
+int configSelected = 0; // chọn béc tưới
 // Biến cuộn cho CONFIG_MENU
 int configScrollOffset = 0;
 const int maxVisible = 3; // Số dòng cấu hình hiển thị được (sau header)
 
 // TIME_SELECT_MENU:
-unsigned int irrigationTime = 1; // thời gian tưới mỗi béc (phút), mặc định 120 = 2 giờ
-
-// define time tăng giảm
+unsigned int irrigationTime = 1; // thời gian tưới mỗi béc (phút); chỉnh về 1 để thử nghiệm
 #define TIME_STEP 1
 
 // RUNNING:
-unsigned long runStartTime = 0;
-int runSprinklerIndices[10]; // danh sách béc được bật theo cấu hình
-int runSprinklerCount = 0;
-int currentRunIndex = 0;
-bool cycleStarted = false;
+unsigned long runStartTime = 0; // thời gian bắt đầu chu trình
+int runSprinklerIndices[10];    // danh sách béc được bật theo cấu hình
+int runSprinklerCount = 0;      // số béc được bật
+int currentRunIndex = 0;        // béc hiện đang chạy
+bool cycleStarted = false;      // đã bắt đầu chu trình
 
 // -------------------------
 // Blynk Virtual Pin callbacks
@@ -120,7 +117,7 @@ BLYNK_WRITE(V10) { digitalWrite(relayPins[9], param.asInt()); }
 BLYNK_WRITE(V11)
 {
   int state = param.asInt();
-  // Kiểm tra xem có ít nhất 1 béc nào bật không
+  // check xem có béc nào được bật không
   bool sprayerActive = false;
   for (int i = 0; i < 10; i++)
   {
@@ -162,7 +159,6 @@ BLYNK_WRITE(V12)
     digitalWrite(relayPins[11], state);
   }
 }
-// V0 dùng cho LED trạng thái kết nối (cập nhật bên dưới)
 
 // -------------------------
 // Hàm kiểm tra cơ chế bảo vệ pump
@@ -188,7 +184,7 @@ void checkPumpProtection()
       Blynk.logEvent("pump_protect", "Khong co bec duoc bat. Tat ca bom");
       digitalWrite(relayPins[10], LOW);
       digitalWrite(relayPins[11], LOW);
-      Serial.println("Pump protection triggered: No sprayer active, pumps turned off");
+      Serial.println("Pump protection triggered: Không có béc nào được bật, tất cả bơm tắt");
     }
   }
   else
@@ -207,14 +203,13 @@ void updateMenuDisplay()
   display.setTextColor(SSD1306_WHITE);
 
   // Dòng đầu tiên: hiển thị trạng thái kết nối (đặt ở góc phải)
-  display.setCursor(40, 0);
+  display.setCursor(120, 0);
   if (Blynk.connected())
-    display.println("CONNECTED: ON");
+    display.println("ON");
   else
-    display.println("CONNECTED: OFF");
+    display.println("OFF");
 
-  // Bắt đầu in menu từ dòng thứ 2 (y = 16)
-  int y = 16;
+  int y = 0;
   switch (currentMenu)
   {
   case MAIN_MENU:
@@ -280,27 +275,29 @@ void updateMenuDisplay()
     display.setCursor(0, y);
     if (currentRunIndex < runSprinklerCount)
     {
-      display.print("Bec ");
+      display.print("BEC ");
       display.print(runSprinklerIndices[currentRunIndex] + 1);
-      display.println(" dang chay");
+      display.println(" DANG CHAY");
       y += 16;
-      unsigned long elapsed = (millis() - runStartTime) / 1000; // giây
-      unsigned long totalSec = irrigationTime * 60;
-      unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
-      unsigned int rh = remain / 3600;
-      unsigned int rm = (remain % 3600) / 60;
-      unsigned int rs = remain % 60;                  // Thêm giây
-      char timeStr[9];                                // Tăng kích thước buffer để chứa thêm giây
-      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs); // Thêm %02u cho giây
+      unsigned long elapsed = (millis() - runStartTime) / 1000;               // giây
+      unsigned long totalSec = irrigationTime * 60;                           // thời gian tưới mỗi béc (phút)
+      unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0; // thời gian còn lại
+      unsigned int rh = remain / 3600;                                        // giờ
+      unsigned int rm = (remain % 3600) / 60;                                 // phút
+      unsigned int rs = remain % 60;                                          // giây
+      char timeStr[9];
+      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
       display.setCursor(0, y);
-      display.print("Con lai: ");
+      display.print("CON LAI: ");
       display.println(timeStr);
       y += 16;
     }
     else
     {
       display.setCursor(0, y);
-      display.println("Xong chu trinh");
+      display.println("XONG CHU TRINH");
+      delay(2000);
+      currentMenu = MAIN_MENU;
     }
     break;
   }
@@ -443,7 +440,7 @@ void processIRRemote()
       {
         if (cmd == "UP")
         {
-          irrigationTime += TIME_STEP; // tăng TIME_STEP phút
+          irrigationTime += TIME_STEP;
         }
         else if (cmd == "DOWN")
         {
@@ -463,6 +460,7 @@ void processIRRemote()
           }
           if (runSprinklerCount == 0)
           {
+            Serial.println("Chua chon bec nao!");
             display.clearDisplay();
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
@@ -498,7 +496,7 @@ void processIRRemote()
       }
       else if (currentMenu == RUNNING)
       {
-        if (cmd == "LEFT")
+        if (cmd == "LEFT" || cmd == "STAR")
         {
           for (int i = 0; i < 12; i++)
           {
@@ -540,7 +538,7 @@ void updateRunning()
         digitalWrite(relayPins[10], HIGH);
         digitalWrite(relayPins[11], HIGH);
       }
-      delay(100);
+      delay(10000); // 10 giây
       int currentBec = runSprinklerIndices[currentRunIndex];
       digitalWrite(relayPins[currentBec], LOW); // Tắt béc cũ
       currentRunIndex++;
@@ -573,7 +571,9 @@ void updateConnectionStatusWrapper()
   }
 }
 
-// Hàm đồng bộ trạng thái relay với Blynk
+// -------------------------
+// Hàm đồng bộ trạng thái relay với Blynk (chỉ gửi khi có thay đổi)
+// -------------------------
 void syncRelayStatusToBlynk()
 {
   static int lastRelayStates[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
@@ -597,7 +597,7 @@ void syncRelayStatusToBlynk()
   }
 }
 
-BlynkTimer timer; // Thêm ở phần khai báo biến toàn cục
+BlynkTimer timer; // Timer toàn cục
 
 // -------------------------
 // setup()
@@ -629,7 +629,7 @@ void setup()
   gpio_viewer.connectToWifi(ssid, pass);
   gpio_viewer.begin();
   setupIR();
-  timer.setInterval(5000L, updateConnectionStatusWrapper); // Chạy mỗi 5000ms = 5 giây
+  timer.setInterval(5000L, updateConnectionStatusWrapper); // Cập nhật trạng thái kết nối mỗi 5 giây
 }
 
 // -------------------------
@@ -639,16 +639,13 @@ void loop()
 {
   Blynk.run();
   processIRRemote();
-
   if (currentMenu == RUNNING)
   {
     updateRunning();
   }
-
   updateMenuDisplay();
   updateConnectionStatusWrapper();
   checkPumpProtection();
   syncRelayStatusToBlynk();
-
   delay(100);
 }
