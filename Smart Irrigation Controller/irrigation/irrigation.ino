@@ -1,6 +1,11 @@
 #include <gpio_viewer.h> // Phải include thư viện này đầu tiên
 GPIOViewer gpio_viewer;
 
+// acc thanhhoangngoc.bmt@gmail.com
+// #define BLYNK_TEMPLATE_ID "TMPL6xy4mK0KN"
+// #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
+// #define BLYNK_AUTH_TOKEN "J34tRXWg_QTXt8bs0SfbZFSc1ARUpL0o"
+
 // acc thanhhoangngoc.bmt1105@gmail.com
 #define BLYNK_TEMPLATE_ID "TMPL6ZR2keF5J"
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
@@ -314,7 +319,7 @@ void updateMenuDisplay()
     display.println("CHON THOI GIAN");
     y += 16;
     display.setCursor(0, y);
-    // Sử dụng currentHour và currentMinute thay vì irrigationTime trực tiếp
+    // Hiển thị con trỏ cho trường đang chỉnh và hiển thị giờ, phút
     display.print(timeSelectHour ? ">" : " ");
     display.print("Hour: ");
     display.print(currentHour);
@@ -498,12 +503,11 @@ void processIRRemote()
       }
       else if (currentMenu == TIME_SELECT_MENU)
       {
-        // Xử lý phím UP/DOWN cho giờ và phút
         if (cmd == "UP")
         {
           if (timeSelectHour)
           {
-            currentHour++;
+            currentHour += TIME_STEP_HOUR;
           }
           else
           {
@@ -518,12 +522,14 @@ void processIRRemote()
           if (timeSelectHour)
           {
             if (currentHour > 0)
-              currentHour--;
+              currentHour -= TIME_STEP_HOUR;
           }
           else
           {
             if (currentMinute >= TIME_STEP_MIN)
               currentMinute -= TIME_STEP_MIN;
+            else
+              currentMinute = 0;
           }
           irrigationTime = currentHour * 60 + currentMinute;
         }
@@ -531,49 +537,64 @@ void processIRRemote()
         {
           // Chuyển đổi giữa chỉnh giờ và chỉnh phút
           timeSelectHour = !timeSelectHour;
-          // Xóa chuỗi nhập số khi chuyển đổi
           timeInput = "";
           lastTimeInput = 0;
         }
         else if (cmd == "OK")
         {
-          // Xác nhận thời gian, tạo danh sách các béc bật và chuyển sang RUNNING
-          runSprinklerCount = 0;
-          for (int i = 0; i < 10; i++)
+          // Nếu giá trị giờ và phút bằng 0, không cho chạy mà quay lại menu
+          if (currentHour == 0 && currentMinute == 0)
           {
-            if (allowedSprinklers[i])
-            {
-              runSprinklerIndices[runSprinklerCount++] = i;
-            }
-          }
-          if (runSprinklerCount == 0)
-          {
-            Serial.println("Chưa chọn béc nào!");
+            Serial.println("Time is 0. Exiting TIME_SELECT_MENU.");
             display.clearDisplay();
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             display.setCursor(0, 0);
-            display.println("CHUA BAT BEC NAO");
+            display.println("0 HOUR 0 MIN");
             display.display();
             delay(2000);
             currentMenu = MAIN_MENU;
           }
           else
           {
-            currentMenu = RUNNING;
-            currentRunIndex = 0;
-            runStartTime = millis();
-            int bec = runSprinklerIndices[currentRunIndex];
-            digitalWrite(relayPins[bec], HIGH);
-            if (bec < 6)
+            // Tạo danh sách các béc bật theo cấu hình và chuyển sang RUNNING
+            runSprinklerCount = 0;
+            for (int i = 0; i < 10; i++)
             {
-              digitalWrite(relayPins[10], HIGH);
-              digitalWrite(relayPins[11], LOW);
+              if (allowedSprinklers[i])
+              {
+                runSprinklerIndices[runSprinklerCount++] = i;
+              }
+            }
+            if (runSprinklerCount == 0)
+            {
+              Serial.println("Chưa chọn béc nào!");
+              display.clearDisplay();
+              display.setTextSize(1);
+              display.setTextColor(SSD1306_WHITE);
+              display.setCursor(0, 0);
+              display.println("CHUA BAT BEC NAO");
+              display.display();
+              delay(2000);
+              currentMenu = MAIN_MENU;
             }
             else
             {
-              digitalWrite(relayPins[10], HIGH);
-              digitalWrite(relayPins[11], HIGH);
+              currentMenu = RUNNING;
+              currentRunIndex = 0;
+              runStartTime = millis();
+              int bec = runSprinklerIndices[currentRunIndex];
+              digitalWrite(relayPins[bec], HIGH);
+              if (bec < 6)
+              {
+                digitalWrite(relayPins[10], HIGH);
+                digitalWrite(relayPins[11], LOW);
+              }
+              else
+              {
+                digitalWrite(relayPins[10], HIGH);
+                digitalWrite(relayPins[11], HIGH);
+              }
             }
           }
         }
@@ -628,69 +649,44 @@ void processIRRemote()
 // =========================
 // Hàm cập nhật chu trình RUNNING:
 // Mỗi béc chạy trong irrigationTime phút.
-// Khi hết thời gian của béc hiện hành, nếu có béc kế tiếp, mở béc mới trước, sau đó tắt béc cũ.
+// Khi hết thời gian của béc hiện hành, nếu có béc kế tiếp, mở béc mới trước (đợi 10 giây) rồi tắt béc cũ.
 // Nếu béc cuối cùng, tắt tất cả và kết thúc chu trình.
 // =========================
 void updateRunning()
 {
-  // Nếu không ở trạng thái RUNNING thì thoát
   if (currentMenu != RUNNING)
     return;
-
-  // Sử dụng non-blocking delay cho giai đoạn chuyển đổi giữa béc
-  static bool transitionActive = false;         // true khi đang ở giai đoạn chuyển đổi (mở béc mới)
-  static unsigned long transitionStartTime = 0; // Thời gian bắt đầu chuyển đổi
-
-  unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
-  unsigned long elapsedCycle = millis() - runStartTime;
-
-  if (!transitionActive)
+  unsigned long duration = (unsigned long)irrigationTime * 60000UL;
+  unsigned long elapsed = millis() - runStartTime;
+  if (elapsed >= duration)
   {
-    // Nếu chu trình của béc hiện tại đã kết thúc
-    if (elapsedCycle >= cycleDuration)
+    if (currentRunIndex + 1 < runSprinklerCount)
     {
-      if (currentRunIndex + 1 < runSprinklerCount)
+      int nextBec = runSprinklerIndices[currentRunIndex + 1];
+      digitalWrite(relayPins[nextBec], HIGH); // Mở béc mới trước
+      if (nextBec < 6)
       {
-        // Bắt đầu giai đoạn chuyển đổi:
-        int nextBec = runSprinklerIndices[currentRunIndex + 1];
-        digitalWrite(relayPins[nextBec], HIGH); // Mở béc mới trước
-        // Điều khiển pump theo logic:
-        if (nextBec < 6)
-        {
-          digitalWrite(relayPins[10], HIGH);
-          digitalWrite(relayPins[11], LOW);
-        }
-        else
-        {
-          digitalWrite(relayPins[10], HIGH);
-          digitalWrite(relayPins[11], HIGH);
-        }
-        transitionActive = true;
-        transitionStartTime = millis();
+        digitalWrite(relayPins[10], HIGH);
+        digitalWrite(relayPins[11], LOW);
       }
       else
       {
-        // Nếu béc hiện tại là béc cuối cùng, tắt béc và pump, kết thúc chu trình
-        int currentBec = runSprinklerIndices[currentRunIndex];
-        digitalWrite(relayPins[currentBec], LOW);
-        digitalWrite(relayPins[10], LOW);
-        digitalWrite(relayPins[11], LOW);
-        currentMenu = MAIN_MENU;
+        digitalWrite(relayPins[10], HIGH);
+        digitalWrite(relayPins[11], HIGH);
       }
-    }
-  }
-  else
-  {
-    // Trong giai đoạn chuyển đổi: kiểm tra nếu đã qua 10 giây
-    if (millis() - transitionStartTime >= 10000UL)
-    {
-      // 10 giây đã trôi qua, tắt béc cũ
+      delay(10000); // Đợi 10 giây
       int currentBec = runSprinklerIndices[currentRunIndex];
-      digitalWrite(relayPins[currentBec], LOW);
-      // Chuyển sang béc kế tiếp
+      digitalWrite(relayPins[currentBec], LOW); // Tắt béc cũ
       currentRunIndex++;
       runStartTime = millis();
-      transitionActive = false;
+    }
+    else
+    {
+      int currentBec = runSprinklerIndices[currentRunIndex];
+      digitalWrite(relayPins[currentBec], LOW);
+      digitalWrite(relayPins[10], LOW);
+      digitalWrite(relayPins[11], LOW);
+      currentMenu = MAIN_MENU;
     }
   }
 }
