@@ -25,8 +25,7 @@ char ssid[] = "VU ne";
 char pass[] = "12341234";
 
 // Relay pins:
-// Relay 1 -> 10: Béc tưới
-// Relay 11: Bơm 1, Relay 12: Bơm 2
+// Relay 1->10: Béc tưới; Relay 11: Bơm 1, Relay 12: Bơm 2
 const int relayPins[12] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23, 26, 25};
 
 // =========================
@@ -86,11 +85,15 @@ int configScrollOffset = 0; // Biến cuộn cho CONFIG_MENU
 const int maxVisible = 3;   // Số dòng cấu hình hiển thị (sau header)
 
 // TIME_SELECT_MENU:
-unsigned int irrigationTime = 1; // Thời gian tưới mỗi béc (phút) – mặc định 120 phút (2 giờ)
-#define TIME_STEP_HOUR 1         // Bước tăng giảm giờ = 1
-#define TIME_STEP_MIN 15         // Bước tăng giảm phút = 15
-// Biến cho chế độ chỉnh giờ/phút trong TIME_SELECT_MENU:
-bool timeSelectHour = true; // true: đang chỉnh giờ, false: đang chỉnh phút
+unsigned int irrigationTime = 120; // Thời gian tưới mỗi béc (phút) – mặc định 120 phút (2 giờ)
+#define TIME_STEP_HOUR 1           // Bước tăng giảm giờ = 1
+#define TIME_STEP_MIN 15           // Bước tăng giảm phút = 15
+// Các biến cho chế độ chỉnh giờ/phút:
+bool timeSelectHour = true;              // true: chỉnh giờ, false: chỉnh phút
+int currentHour = irrigationTime / 60;   // Lưu giờ hiện tại
+int currentMinute = irrigationTime % 60; // Lưu phút hiện tại
+String timeInput = "";                   // Chuỗi tạm nhập số
+unsigned long lastTimeInput = 0;         // Thời gian nhập số cuối
 
 // RUNNING:
 unsigned long runStartTime = 0; // Thời gian bắt đầu chu trình tưới
@@ -113,6 +116,7 @@ BLYNK_WRITE(V7) { digitalWrite(relayPins[6], param.asInt()); }
 BLYNK_WRITE(V8) { digitalWrite(relayPins[7], param.asInt()); }
 BLYNK_WRITE(V9) { digitalWrite(relayPins[8], param.asInt()); }
 BLYNK_WRITE(V10) { digitalWrite(relayPins[9], param.asInt()); }
+
 // Điều khiển bơm: V11 và V12 với cơ chế bảo vệ
 BLYNK_WRITE(V11)
 {
@@ -163,7 +167,7 @@ BLYNK_WRITE(V12)
 // Các hàm bảo vệ, đồng bộ, hiển thị
 // =========================
 
-// Kiểm tra bảo vệ pump: nếu không có béc nào bật mà bơm đang bật -> tắt bơm
+// Kiểm tra bảo vệ pump: nếu không có béc nào bật mà bơm đang bật -> tắt bơm.
 void checkPumpProtection()
 {
   static bool lastPumpProtectionTriggered = false;
@@ -302,9 +306,6 @@ void updateMenuDisplay()
       display.println(allowedSprinklers[i] ? "ON" : "OFF");
       y += 16;
     }
-    // Hướng dẫn: *: Cancel, #: Save
-    display.setCursor(0, y);
-    display.println("*: Cancel  #: Save");
     break;
 
   case TIME_SELECT_MENU:
@@ -313,30 +314,14 @@ void updateMenuDisplay()
     display.println("CHON THOI GIAN");
     y += 16;
     display.setCursor(0, y);
-    int hour = irrigationTime / 60;
-    int minute = irrigationTime % 60;
-    // Hiển thị con trỏ chỉ vào trường được chỉnh
-    if (timeSelectHour)
-    {
-      display.print(">");
-    }
-    else
-    {
-      display.print(" ");
-    }
+    // Sử dụng currentHour và currentMinute thay vì irrigationTime trực tiếp
+    display.print(timeSelectHour ? ">" : " ");
     display.print("Hour: ");
-    display.print(hour);
+    display.print(currentHour);
     display.print("  ");
-    if (!timeSelectHour)
-    {
-      display.print(">");
-    }
-    else
-    {
-      display.print(" ");
-    }
+    display.print(!timeSelectHour ? ">" : " ");
     display.print("Min: ");
-    display.println(minute);
+    display.println(currentMinute);
     break;
   }
 
@@ -348,7 +333,7 @@ void updateMenuDisplay()
       display.print(runSprinklerIndices[currentRunIndex] + 1);
       display.println(" DANG CHAY");
       y += 16;
-      unsigned long elapsed = (millis() - runStartTime) / 1000;
+      unsigned long elapsed = (millis() - runStartTime) / 1000; // giây
       unsigned long totalSec = irrigationTime * 60;
       unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
       unsigned int rh = remain / 3600;
@@ -473,6 +458,10 @@ void processIRRemote()
           {
             currentMenu = TIME_SELECT_MENU;
             timeSelectHour = true; // Mặc định chỉnh giờ
+            currentHour = irrigationTime / 60;
+            currentMinute = irrigationTime % 60;
+            timeInput = "";
+            lastTimeInput = 0;
           }
         }
       }
@@ -509,56 +498,46 @@ void processIRRemote()
       }
       else if (currentMenu == TIME_SELECT_MENU)
       {
+        // Xử lý phím UP/DOWN cho giờ và phút
         if (cmd == "UP")
         {
           if (timeSelectHour)
           {
-            // Tăng giờ (+1)
-            int hour = irrigationTime / 60;
-            int minute = irrigationTime % 60;
-            hour++;
-            irrigationTime = hour * 60 + minute;
+            currentHour++;
           }
           else
           {
-            // Tăng phút (+15)
-            int hour = irrigationTime / 60;
-            int minute = irrigationTime % 60;
-            minute += 15;
-            if (minute >= 60)
-              minute = 59; // Giới hạn phút
-            irrigationTime = hour * 60 + minute;
+            currentMinute += TIME_STEP_MIN;
+            if (currentMinute >= 60)
+              currentMinute = 59;
           }
+          irrigationTime = currentHour * 60 + currentMinute;
         }
         else if (cmd == "DOWN")
         {
           if (timeSelectHour)
           {
-            // Giảm giờ (-1), không âm
-            int hour = irrigationTime / 60;
-            int minute = irrigationTime % 60;
-            if (hour > 0)
-              hour--;
-            irrigationTime = hour * 60 + minute;
+            if (currentHour > 0)
+              currentHour--;
           }
           else
           {
-            // Giảm phút (-15), không âm
-            int hour = irrigationTime / 60;
-            int minute = irrigationTime % 60;
-            if (minute >= 15)
-              minute -= 15;
-            irrigationTime = hour * 60 + minute;
+            if (currentMinute >= TIME_STEP_MIN)
+              currentMinute -= TIME_STEP_MIN;
           }
+          irrigationTime = currentHour * 60 + currentMinute;
         }
         else if (cmd == "LEFT" || cmd == "RIGHT")
         {
           // Chuyển đổi giữa chỉnh giờ và chỉnh phút
           timeSelectHour = !timeSelectHour;
+          // Xóa chuỗi nhập số khi chuyển đổi
+          timeInput = "";
+          lastTimeInput = 0;
         }
         else if (cmd == "OK")
         {
-          // Tạo danh sách các béc bật theo cấu hình và chuyển sang RUNNING
+          // Xác nhận thời gian, tạo danh sách các béc bật và chuyển sang RUNNING
           runSprinklerCount = 0;
           for (int i = 0; i < 10; i++)
           {
@@ -597,6 +576,32 @@ void processIRRemote()
               digitalWrite(relayPins[11], HIGH);
             }
           }
+        }
+        else if (cmd >= "0" && cmd <= "9")
+        {
+          // Xử lý nhập số 2 chữ số cho giờ/phút
+          unsigned long now = millis();
+          if (now - lastTimeInput < 1000)
+          {
+            timeInput += cmd;
+          }
+          else
+          {
+            timeInput = cmd;
+          }
+          lastTimeInput = now;
+          int value = timeInput.toInt();
+          if (timeSelectHour)
+          {
+            currentHour = value;
+          }
+          else
+          {
+            currentMinute = value;
+            if (currentMinute >= 60)
+              currentMinute = 59;
+          }
+          irrigationTime = currentHour * 60 + currentMinute;
         }
         else if (cmd == "STAR")
         { // Dùng STAR để hủy TIME_SELECT_MENU
