@@ -309,7 +309,8 @@ void updateMenuDisplay()
       y += 16;
       display.setCursor(0, y);
       display.print("  TU DONG (");
-      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.print((autoMode == AUTO_ON) ? "ON - " : "OFF - ");
+      display.print(autoCurrentSprinkler + 1);
       display.println(")");
     }
     else if (mainMenuSelection == 1)
@@ -322,7 +323,8 @@ void updateMenuDisplay()
       y += 16;
       display.setCursor(0, y);
       display.print("  TU DONG (");
-      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.print((autoMode == AUTO_ON) ? "ON - " : "OFF - ");
+      display.print(autoCurrentSprinkler + 1);
       display.println(")");
     }
     else
@@ -335,7 +337,8 @@ void updateMenuDisplay()
       y += 16;
       display.setCursor(0, y);
       display.print("> TU DONG (");
-      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.print((autoMode == AUTO_ON) ? "ON - " : "OFF - ");
+      display.print(autoCurrentSprinkler + 1);
       display.println(")");
     }
     break;
