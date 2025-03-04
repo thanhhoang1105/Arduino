@@ -3,11 +3,14 @@
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
 #define BLYNK_AUTH_TOKEN "x-Uc3uA1wCZtbDWniO6yWTDrLHsVqOJ-"
 
+#include <Preferences.h> // Thư viện Preferences để lưu config
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <IRremote.hpp>
+
+Preferences preferences; // Đối tượng Preferences
 
 // =========================
 // OLED, WiFi & Relay Setup
@@ -21,8 +24,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 char ssid[] = "VU ne";
 char pass[] = "12341234";
 
-// Relay pins:
-// Relay 1->10: Béc tưới; Relay 11: Bơm 1, Relay 12: Bơm 2
+// Relay pins: Relay 1->10: Béc tưới; Relay 11: Bơm 1; Relay 12: Bơm 2
 const int relayPins[12] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23, 26, 25};
 
 // =========================
@@ -70,19 +72,17 @@ enum MenuState
   RUNNING
 };
 MenuState currentMenu = MAIN_MENU;
-
-// MAIN_MENU: 0 - CAU HINH, 1 - KHOI DONG
-int mainMenuSelection = 0;
+int mainMenuSelection = 0; // MAIN_MENU: 0 - CAU HINH, 1 - KHOI DONG
 
 // CONFIG_MENU:
-// Có hai chế độ: configMode = 0: BEC, configMode = 1: DELAY
-int configMode = 0; // 0: BEC, 1: DELAY
+// configMode = 0: BEC, configMode = 1: DELAY
+int configMode = 0;
 bool allowedSprinklers[10];
-bool backupConfig[10];           // Backup cấu hình khi vào CONFIG_MENU
-int configSelected = 0;          // Béc được chọn (áp dụng khi configMode==0)
-int configScrollOffset = 0;      // Biến cuộn cho CONFIG_MENU
-const int maxVisible = 3;        // Số dòng hiển thị cho cấu hình BEC
-int transitionDelaySeconds = 10; // Delay (giây) cho chuyển đổi, áp dụng khi configMode==1
+bool backupConfig[10];
+int configSelected = 0; // Áp dụng khi configMode==0
+int configScrollOffset = 0;
+const int maxVisibleList = 2;    // Dành cho danh sách BEC (để hướng dẫn luôn hiện)
+int transitionDelaySeconds = 10; // Delay (giây) cho chuyển đổi (áp dụng khi configMode==1)
 
 // TIME_SELECT_MENU:
 unsigned int irrigationTime = 120; // Thời gian tưới mỗi béc (phút) – mặc định 120 phút (2 giờ)
@@ -101,11 +101,12 @@ int runSprinklerIndices[10];    // Danh sách béc được bật theo cấu hì
 int runSprinklerCount = 0;      // Số béc được bật
 int currentRunIndex = 0;        // Béc hiện đang chạy
 bool cycleStarted = false;      // Đã bắt đầu chu trình?
+bool paused = false;
+unsigned long pauseRemaining = 0;
 
 // =========================
 // Blynk Virtual Pin Callbacks
 // =========================
-// Điều khiển béc tưới: V1 - V10
 BLYNK_WRITE(V1) { digitalWrite(relayPins[0], param.asInt()); }
 BLYNK_WRITE(V2) { digitalWrite(relayPins[1], param.asInt()); }
 BLYNK_WRITE(V3) { digitalWrite(relayPins[2], param.asInt()); }
@@ -116,7 +117,6 @@ BLYNK_WRITE(V7) { digitalWrite(relayPins[6], param.asInt()); }
 BLYNK_WRITE(V8) { digitalWrite(relayPins[7], param.asInt()); }
 BLYNK_WRITE(V9) { digitalWrite(relayPins[8], param.asInt()); }
 BLYNK_WRITE(V10) { digitalWrite(relayPins[9], param.asInt()); }
-
 // Điều khiển bơm: V11 và V12 với cơ chế bảo vệ
 BLYNK_WRITE(V11)
 {
@@ -166,8 +166,36 @@ BLYNK_WRITE(V12)
 // =========================
 // Các hàm bảo vệ, đồng bộ, hiển thị
 // =========================
+void saveConfig()
+{
+  preferences.begin("config", false);
+  for (int i = 0; i < 10; i++)
+  {
+    String key = "sprayer" + String(i);
+    preferences.putBool(key.c_str(), allowedSprinklers[i]);
+  }
+  preferences.putInt("delay", transitionDelaySeconds);
+  preferences.putUInt("irrigationTime", irrigationTime);
+  preferences.end();
+  Serial.println("Config saved.");
+}
 
-// Kiểm tra bảo vệ pump: nếu không có béc nào bật mà bơm đang bật -> tắt bơm
+void loadConfig()
+{
+  preferences.begin("config", true);
+  for (int i = 0; i < 10; i++)
+  {
+    String key = "sprayer" + String(i);
+    allowedSprinklers[i] = preferences.getBool(key.c_str(), false);
+  }
+  transitionDelaySeconds = preferences.getInt("delay", 10);
+  irrigationTime = preferences.getUInt("irrigationTime", 120);
+  currentHour = irrigationTime / 60;
+  currentMinute = irrigationTime % 60;
+  preferences.end();
+  Serial.println("Config loaded.");
+}
+
 void checkPumpProtection()
 {
   static bool lastPumpProtectionTriggered = false;
@@ -216,50 +244,44 @@ void syncRelayStatusToBlynk()
         Blynk.virtualWrite(12, currentState);
       Serial.print("Relay ");
       Serial.print(i);
-      Serial.print(" state changed to ");
+      Serial.print(" -> ");
       Serial.println(currentState);
     }
   }
 }
+
 // Đặt hằng số cho bố cục màn hình trong CONFIG_MENU:
 const int headerHeight = 16;                                                 // Chiều cao header
 const int instructionHeight = 16;                                            // Chiều cao hướng dẫn (ở dưới cùng)
 const int listAreaHeight = SCREEN_HEIGHT - headerHeight - instructionHeight; // 64 - 16 - 16 = 32
-const int maxVisibleList = listAreaHeight / 16;                              // = 2 dòng
 
-// Hàm hiển thị menu trên OLED (text size = 1, line spacing = 16)
+// =========================
+// Hàm hiển thị menu trên OLED
+// =========================
 void updateMenuDisplay()
 {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Dòng đầu tiên: trạng thái kết nối (đặt ở góc phải)
   display.setCursor(110, 0);
-  if (Blynk.connected())
-    display.println("ON");
-  else
-    display.println("OFF");
-
-  int y = 0;
+  display.println(Blynk.connected() ? "ON" : "OFF");
 
   switch (currentMenu)
   {
   case MAIN_MENU:
     if (mainMenuSelection == 0)
     {
-      display.setCursor(0, y);
+      display.setCursor(0, 0);
       display.println("> CAU HINH");
-      y += 16;
-      display.setCursor(0, y);
+      display.setCursor(0, 16);
       display.println("  KHOI DONG");
     }
     else
     {
-      display.setCursor(0, y);
+      display.setCursor(0, 0);
       display.println("  CAU HINH");
-      y += 16;
-      display.setCursor(0, y);
+      display.setCursor(0, 16);
       display.println("> KHOI DONG");
     }
     break;
@@ -280,17 +302,14 @@ void updateMenuDisplay()
       for (int i = configScrollOffset; i < 10 && i < configScrollOffset + maxVisibleList; i++)
       {
         display.setCursor(0, y);
-        if (i == configSelected)
-          display.print(">");
-        else
-          display.print(" ");
+        display.print(i == configSelected ? ">" : " ");
         display.print("Bec ");
         display.print(i + 1);
         display.print(": ");
         display.println(allowedSprinklers[i] ? "ON" : "OFF");
         y += 16;
       }
-      // Vẽ hướng dẫn cố định ở vùng dưới cùng:
+      // Hướng dẫn
       display.setCursor(0, SCREEN_HEIGHT - instructionHeight);
       display.println("*: Cancel  #: Save");
     }
@@ -303,7 +322,7 @@ void updateMenuDisplay()
       display.setCursor(0, y);
       display.print("Delay (s): ");
       display.println(transitionDelaySeconds);
-      // Vẽ hướng dẫn cố định:
+      // Hướng dẫn
       display.setCursor(0, SCREEN_HEIGHT - instructionHeight);
       display.println("*: Cancel  #: Save");
     }
@@ -327,27 +346,71 @@ void updateMenuDisplay()
   }
 
   case RUNNING:
-    // Nếu đang trong giai đoạn chuyển đổi, hiển thị thông tin chuyển đổi
-    // Ta sử dụng biến transitionActive và transitionRemaining (đã được cập nhật trong updateRunning())
+  {
+    extern bool transitionActive;
+    extern unsigned long transitionStartTime;
+    extern int transitionDelaySeconds;
+    extern bool paused;
+    extern unsigned long pauseRemaining;
+    if (transitionActive)
     {
-      extern bool transitionActive;             // khai báo ở updateRunning()
-      extern unsigned long transitionStartTime; // thời gian bắt đầu chuyển đổi
-      extern int transitionDelaySeconds;        // giá trị delay cấu hình
-      if (transitionActive)
+      int nextBec = runSprinklerIndices[currentRunIndex + 1];
+      int currentBec = runSprinklerIndices[currentRunIndex];
+      unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
+      int transRemaining = transitionDelaySeconds - transElapsed;
+      if (transRemaining < 0)
+        transRemaining = 0;
+      // Dòng 1: BEC mới đang mở
+      display.setCursor(0, 0);
+      display.print("BEC ");
+      display.print(nextBec + 1);
+      display.println(" DANG MO");
+      // Dòng 2: Thời gian còn lại của chu kỳ hiện hành
+      unsigned long elapsed = (millis() - runStartTime) / 1000;
+      unsigned long totalSec = irrigationTime * 60;
+      unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
+      unsigned int rh = remain / 3600;
+      unsigned int rm = (remain % 3600) / 60;
+      unsigned int rs = remain % 60;
+      char timeStr[9];
+      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
+      display.setCursor(0, 16);
+      display.print("CON LAI: ");
+      display.println(timeStr);
+      // Dòng 3: BEC hiện đang đóng trong: transRemaining s
+      display.setCursor(0, 32);
+      display.print("BEC ");
+      display.print(currentBec + 1);
+      display.print(" DONG TRONG: ");
+      display.print(transRemaining);
+      display.println("s");
+    }
+    else if (paused)
+    {
+      display.setCursor(0, 0);
+      display.println("RUNNING PAUSED");
+      // Chuyển đổi pauseRemaining (ms) sang HH:MM:SS
+      unsigned long remSec = pauseRemaining / 1000;
+      unsigned int rh = remSec / 3600;
+      unsigned int rm = (remSec % 3600) / 60;
+      unsigned int rs = remSec % 60;
+      char timeStr[9];
+      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
+      display.setCursor(0, 16);
+      display.print("BEC ");
+      display.print(runSprinklerIndices[currentRunIndex] + 1);
+      display.print(" - CON LAI: ");
+      display.setCursor(0, 32);
+      display.println(timeStr);
+    }
+    else
+    {
+      display.setCursor(0, 0);
+      if (currentRunIndex < runSprinklerCount)
       {
-        int nextBec = runSprinklerIndices[currentRunIndex + 1];
-        int currentBec = runSprinklerIndices[currentRunIndex];
-        unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
-        int transRemaining = transitionDelaySeconds - transElapsed;
-        if (transRemaining < 0)
-          transRemaining = 0;
-        // Dòng 1: BEC mới đang mở
-        display.setCursor(0, y);
         display.print("BEC ");
-        display.print(nextBec + 1);
-        display.println(" DANG MO");
-        y += 16;
-        // Dòng 2: Thời gian còn lại của chu kỳ hiện hành (có thể là 00:00:00)
+        display.print(runSprinklerIndices[currentRunIndex] + 1);
+        display.println(" DANG CHAY");
         unsigned long elapsed = (millis() - runStartTime) / 1000;
         unsigned long totalSec = irrigationTime * 60;
         unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
@@ -356,57 +419,26 @@ void updateMenuDisplay()
         unsigned int rs = remain % 60;
         char timeStr[9];
         sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-        display.setCursor(0, y);
+        display.setCursor(0, 16);
         display.print("CON LAI: ");
         display.println(timeStr);
-        y += 16;
-        // Dòng 3: BEC hiện đang đóng trong: transRemaining s
-        display.setCursor(0, y);
-        display.print("BEC ");
-        display.print(currentBec + 1);
-        display.print(" DONG TRONG: ");
-        display.print(transRemaining);
-        display.println("s");
       }
       else
       {
-        // Không ở giai đoạn chuyển đổi
-        display.setCursor(0, y);
-        if (currentRunIndex < runSprinklerCount)
-        {
-          display.print("BEC ");
-          display.print(runSprinklerIndices[currentRunIndex] + 1);
-          display.println(" DANG CHAY");
-          y += 16;
-          unsigned long elapsed = (millis() - runStartTime) / 1000;
-          unsigned long totalSec = irrigationTime * 60;
-          unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
-          unsigned int rh = remain / 3600;
-          unsigned int rm = (remain % 3600) / 60;
-          unsigned int rs = remain % 60;
-          char timeStr[9];
-          sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-          display.setCursor(0, y);
-          display.print("CON LAI: ");
-          display.println(timeStr);
-          y += 16;
-        }
-        else
-        {
-          display.setCursor(0, y);
-          display.println("XONG CHU TRINH");
-          delay(2000);
-          currentMenu = MAIN_MENU;
-        }
+        display.setCursor(0, 0);
+        display.println("XONG CHU TRINH");
+        delay(2000);
+        currentMenu = MAIN_MENU;
       }
     }
     break;
+  }
   }
   display.display();
 }
 
 // =========================
-// Hàm xử lý IR Remote (sử dụng IRremote.hpp)
+// Hàm xử lý IR Remote
 // =========================
 void processIRRemote()
 {
@@ -486,7 +518,7 @@ void processIRRemote()
       {
         if (cmd == "UP" || cmd == "DOWN")
         {
-          mainMenuSelection = 1 - mainMenuSelection; // Toggle
+          mainMenuSelection = 1 - mainMenuSelection;
         }
         else if (cmd == "OK")
         {
@@ -563,6 +595,7 @@ void processIRRemote()
         else if (cmd == "HASH")
         {
           // Lưu cấu hình và quay lại MAIN_MENU
+          saveConfig();
           currentMenu = MAIN_MENU;
         }
       }
@@ -620,6 +653,7 @@ void processIRRemote()
           }
           else
           {
+            saveConfig();
             runSprinklerCount = 0;
             for (int i = 0; i < 10; i++)
             {
@@ -630,7 +664,7 @@ void processIRRemote()
             }
             if (runSprinklerCount == 0)
             {
-              Serial.println("Chưa chọn béc nào!");
+              Serial.println("Chua bat bec nao!");
               display.clearDisplay();
               display.setTextSize(1);
               display.setTextColor(SSD1306_WHITE);
@@ -645,6 +679,7 @@ void processIRRemote()
               currentMenu = RUNNING;
               currentRunIndex = 0;
               runStartTime = millis();
+              paused = false;
               int bec = runSprinklerIndices[currentRunIndex];
               digitalWrite(relayPins[bec], HIGH);
               if (bec < 6)
@@ -692,7 +727,36 @@ void processIRRemote()
       }
       else if (currentMenu == RUNNING)
       {
-        if (cmd == "STAR")
+        // Pause/Resume cơ chế: nhấn OK để toggle pause
+        if (cmd == "OK")
+        {
+          if (!paused)
+          {
+            paused = true;
+            unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
+            pauseRemaining = cycleDuration - (millis() - runStartTime);
+            digitalWrite(relayPins[10], LOW);
+            digitalWrite(relayPins[11], LOW);
+            Serial.println("RUNNING paused.");
+          }
+          else
+          {
+            runStartTime = millis() - ((unsigned long)irrigationTime * 60000UL - pauseRemaining);
+            int bec = runSprinklerIndices[currentRunIndex];
+            if (bec < 6)
+            {
+              digitalWrite(relayPins[10], HIGH);
+            }
+            else
+            {
+              digitalWrite(relayPins[10], HIGH);
+              digitalWrite(relayPins[11], HIGH);
+            }
+            paused = false;
+            Serial.println("RUNNING resumed.");
+          }
+        }
+        else if (cmd == "STAR")
         {
           for (int i = 0; i < 12; i++)
           {
@@ -718,20 +782,20 @@ void updateRunning()
   if (currentMenu != RUNNING)
     return;
 
+  if (paused)
+    return;
+
   unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
 
   if (!transitionActive)
   {
-    // Nếu chu kỳ hiện hành đã kết thúc
     if (elapsedCycle >= cycleDuration)
     {
       if (currentRunIndex + 1 < runSprinklerCount)
       {
-        // Bắt đầu giai đoạn chuyển đổi
         int nextBec = runSprinklerIndices[currentRunIndex + 1];
         digitalWrite(relayPins[nextBec], HIGH); // Mở béc mới trước
-        // Điều khiển pump theo logic
         if (nextBec < 6)
         {
           digitalWrite(relayPins[10], HIGH);
@@ -747,7 +811,6 @@ void updateRunning()
       }
       else
       {
-        // Nếu béc hiện là béc cuối, tắt tất cả và quay lại MAIN_MENU
         int currentBec = runSprinklerIndices[currentRunIndex];
         digitalWrite(relayPins[currentBec], LOW);
         digitalWrite(relayPins[10], LOW);
@@ -758,12 +821,10 @@ void updateRunning()
   }
   else
   {
-    // Trong giai đoạn chuyển đổi, tính thời gian chuyển đổi còn lại
     unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
     int transRemaining = transitionDelaySeconds - transElapsed;
     if (transRemaining <= 0)
     {
-      // Kết thúc chuyển đổi: tắt béc cũ và chuyển sang béc mới
       int currentBec = runSprinklerIndices[currentRunIndex];
       digitalWrite(relayPins[currentBec], LOW);
       currentRunIndex++;
@@ -773,7 +834,8 @@ void updateRunning()
   }
 }
 
-// setup()
+BlynkTimer timer;
+
 void setup()
 {
   Serial.begin(115200);
@@ -782,7 +844,6 @@ void setup()
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], LOW);
   }
-  // Khởi tạo cấu hình mặc định: tất cả béc OFF
   for (int i = 0; i < 10; i++)
   {
     allowedSprinklers[i] = false;
@@ -790,20 +851,18 @@ void setup()
   Wire.begin(32, 33);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
-    Serial.println("OLED SSD1306 không khởi tạo được");
+    Serial.println("OLED SSD1306 khong khoi tao duoc");
     while (true)
       ;
   }
   display.clearDisplay();
   display.display();
+  loadConfig();
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   Serial.println("ESP32 connected to Blynk!");
   setupIR();
 }
 
-// =========================
-// loop()
-// =========================
 void loop()
 {
   Blynk.run();
