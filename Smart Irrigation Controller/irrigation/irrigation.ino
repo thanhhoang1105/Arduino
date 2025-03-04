@@ -3,14 +3,15 @@
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
 #define BLYNK_AUTH_TOKEN "x-Uc3uA1wCZtbDWniO6yWTDrLHsVqOJ-"
 
-#include <Preferences.h> // Thư viện Preferences để lưu config
+#include <Preferences.h>
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <IRremote.hpp>
+#include <time.h>
 
-Preferences preferences; // Đối tượng Preferences
+Preferences preferences;
 
 // =========================
 // OLED, WiFi & Relay Setup
@@ -28,7 +29,7 @@ char pass[] = "12341234";
 const int relayPins[12] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23, 26, 25};
 
 // =========================
-// IR Remote Setup (IRremote.hpp)
+// IR Remote Setup
 // =========================
 const int RECV_PIN = 15; // Chân nhận IR
 void setupIR()
@@ -59,20 +60,21 @@ void setupIR()
 // Biến debounce cho IR
 unsigned long lastCode = 0;
 unsigned long lastReceiveTime = 0;
-const unsigned long debounceTime = 500; // ms
+const unsigned long debounceTime = 500;
 
 // =========================
-// Menu State Definition
+// Menu & Config
 // =========================
 enum MenuState
 {
   MAIN_MENU,
   CONFIG_MENU,
   TIME_SELECT_MENU,
+  AUTO_MENU,
   RUNNING
 };
 MenuState currentMenu = MAIN_MENU;
-int mainMenuSelection = 0; // MAIN_MENU: 0 - CAU HINH, 1 - KHOI DONG
+int mainMenuSelection = 0; // 0: CAU HINH, 1: KHOI DONG, 2: TU DONG
 
 // CONFIG_MENU:
 // configMode = 0: BEC, configMode = 1: DELAY
@@ -85,7 +87,7 @@ const int maxVisibleList = 2;    // Dành cho danh sách BEC (để hướng d�
 int transitionDelaySeconds = 10; // Delay (giây) cho chuyển đổi (áp dụng khi configMode==1)
 
 // TIME_SELECT_MENU:
-unsigned int irrigationTime = 120; // Thời gian tưới mỗi béc (phút) – mặc định 120 phút (2 giờ)
+unsigned int irrigationTime = 120; // mặc định 120 phút (2 giờ)
 #define TIME_STEP_HOUR 1           // Bước tăng giảm giờ = 1
 #define TIME_STEP_MIN 15           // Bước tăng giảm phút = 15
 // Các biến cho chế độ chỉnh giờ/phút:
@@ -103,6 +105,29 @@ int currentRunIndex = 0;        // Béc hiện đang chạy
 bool cycleStarted = false;      // Đã bắt đầu chu trình?
 bool paused = false;
 unsigned long pauseRemaining = 0;
+
+// =========================
+// Auto Mode: AUTO_MENU
+// =========================
+enum AutoOption
+{
+  AUTO_ON_OPT,
+  AUTO_OFF_OPT,
+  AUTO_RESET_OPT
+};
+int autoMenuSelection = 0; // 0: AUTO ON, 1: AUTO OFF, 2: RESET
+
+// Để lưu chế độ AUTO (ON/OFF)
+enum AutoMode
+{
+  AUTO_ON,
+  AUTO_OFF
+};
+AutoMode autoMode = AUTO_OFF;
+int autoCurrentSprinkler = 0; // Lưu béc hiện tại của chế độ tự động
+// Các biến auto có thể lưu vào NVS để khôi phục
+bool autoCycleActive = false;
+unsigned long autoCycleStartTime = 0;
 
 // =========================
 // Blynk Virtual Pin Callbacks
@@ -164,7 +189,7 @@ BLYNK_WRITE(V12)
 }
 
 // =========================
-// Các hàm bảo vệ, đồng bộ, hiển thị
+// Save & Load Config
 // =========================
 void saveConfig()
 {
@@ -176,6 +201,7 @@ void saveConfig()
   }
   preferences.putInt("delay", transitionDelaySeconds);
   preferences.putUInt("irrigationTime", irrigationTime);
+  preferences.putInt("autoSprinkler", autoCurrentSprinkler);
   preferences.end();
   Serial.println("Config saved.");
 }
@@ -190,12 +216,17 @@ void loadConfig()
   }
   transitionDelaySeconds = preferences.getInt("delay", 10);
   irrigationTime = preferences.getUInt("irrigationTime", 120);
+  autoCurrentSprinkler = preferences.getInt("autoSprinkler", 0);
   currentHour = irrigationTime / 60;
   currentMinute = irrigationTime % 60;
   preferences.end();
   Serial.println("Config loaded.");
 }
 
+// =========================
+// Other Functions
+// =========================
+// Hàm kiểm tra bảo vệ bơm
 void checkPumpProtection()
 {
   static bool lastPumpProtectionTriggered = false;
@@ -214,10 +245,10 @@ void checkPumpProtection()
     if (!lastPumpProtectionTriggered)
     {
       lastPumpProtectionTriggered = true;
-      Blynk.logEvent("pump_protect", "Không có béc được bật. Tắt tất cả bơm");
+      Blynk.logEvent("pump_protect", "Không có béc được bật. Tắt bơm");
       digitalWrite(relayPins[10], LOW);
       digitalWrite(relayPins[11], LOW);
-      Serial.println("Pump protection triggered: No sprayer active, pumps turned off");
+      Serial.println("Bảo vệ bơm đã được kích hoạt.");
     }
   }
   else
@@ -226,37 +257,34 @@ void checkPumpProtection()
   }
 }
 
-// Đồng bộ trạng thái relay với Blynk (chỉ gửi khi có thay đổi)
+// =========================
+// Sync Relay Status to Blynk
+// =========================
 void syncRelayStatusToBlynk()
 {
-  static int lastRelayStates[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+  static int lastStates[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
   for (int i = 0; i < 12; i++)
   {
-    int currentState = digitalRead(relayPins[i]);
-    if (currentState != lastRelayStates[i])
+    int cur = digitalRead(relayPins[i]);
+    if (cur != lastStates[i])
     {
-      lastRelayStates[i] = currentState;
+      lastStates[i] = cur;
       if (i < 10)
-        Blynk.virtualWrite(i + 1, currentState);
+        Blynk.virtualWrite(i + 1, cur);
       else if (i == 10)
-        Blynk.virtualWrite(11, currentState);
+        Blynk.virtualWrite(11, cur);
       else if (i == 11)
-        Blynk.virtualWrite(12, currentState);
+        Blynk.virtualWrite(12, cur);
       Serial.print("Relay ");
       Serial.print(i);
       Serial.print(" -> ");
-      Serial.println(currentState);
+      Serial.println(cur);
     }
   }
 }
 
-// Đặt hằng số cho bố cục màn hình trong CONFIG_MENU:
-const int headerHeight = 16;                                                 // Chiều cao header
-const int instructionHeight = 16;                                            // Chiều cao hướng dẫn (ở dưới cùng)
-const int listAreaHeight = SCREEN_HEIGHT - headerHeight - instructionHeight; // 64 - 16 - 16 = 32
-
 // =========================
-// Hàm hiển thị menu trên OLED
+// Menu Display
 // =========================
 void updateMenuDisplay()
 {
@@ -264,13 +292,13 @@ void updateMenuDisplay()
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   int y = 0;
-
   display.setCursor(110, y);
   display.println(Blynk.connected() ? "ON" : "OFF");
 
   switch (currentMenu)
   {
   case MAIN_MENU:
+    // MAIN_MENU có 3 mục: CAU HINH, KHOI DONG, TU DONG (hiển thị trạng thái AUTO)
     if (mainMenuSelection == 0)
     {
       display.setCursor(0, y);
@@ -278,17 +306,39 @@ void updateMenuDisplay()
       y += 16;
       display.setCursor(0, y);
       display.println("  KHOI DONG");
+      y += 16;
+      display.setCursor(0, y);
+      display.print("  TU DONG (");
+      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.println(")");
     }
-    else
+    else if (mainMenuSelection == 1)
     {
       display.setCursor(0, y);
       display.println("  CAU HINH");
       y += 16;
       display.setCursor(0, y);
       display.println("> KHOI DONG");
+      y += 16;
+      display.setCursor(0, y);
+      display.print("  TU DONG (");
+      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.println(")");
+    }
+    else
+    { // mainMenuSelection == 2, tức TU DONG
+      display.setCursor(0, y);
+      display.println("  CAU HINH");
+      y += 16;
+      display.setCursor(0, y);
+      display.println("  KHOI DONG");
+      y += 16;
+      display.setCursor(0, y);
+      display.print("> TU DONG (");
+      display.print((autoMode == AUTO_ON) ? "ON" : "OFF");
+      display.println(")");
     }
     break;
-
   case CONFIG_MENU:
     // Trong CONFIG_MENU, hiển thị tùy theo configMode
     if (configMode == 0)
@@ -312,21 +362,18 @@ void updateMenuDisplay()
         display.println(allowedSprinklers[i] ? "ON" : "OFF");
         y += 16;
       }
-      // Hướng dẫn
-      display.setCursor(0, SCREEN_HEIGHT - instructionHeight);
+      display.setCursor(0, SCREEN_HEIGHT - 16);
       display.println("*: Cancel  #: Save");
     }
     else
     {
-      // Chế độ DELAY
       display.setCursor(0, y);
       display.println("CAU HINH - DELAY:");
       y += 16;
       display.setCursor(0, y);
       display.print("Delay (s): ");
       display.println(transitionDelaySeconds);
-      // Hướng dẫn
-      display.setCursor(0, SCREEN_HEIGHT - instructionHeight);
+      display.setCursor(0, SCREEN_HEIGHT - 16);
       display.println("*: Cancel  #: Save");
     }
     break;
@@ -347,7 +394,24 @@ void updateMenuDisplay()
     display.println(currentMinute);
     break;
   }
-
+  case AUTO_MENU:
+  {
+    display.setCursor(0, y);
+    display.println("TU DONG:");
+    y += 16;
+    String options[3] = {"AUTO ON", "AUTO OFF", "RESET"};
+    for (int i = 0; i < 3; i++)
+    {
+      display.setCursor(0, y);
+      if (i == autoMenuSelection)
+        display.print(">");
+      else
+        display.print(" ");
+      display.println(options[i]);
+      y += 16;
+    }
+    break;
+  }
   case RUNNING:
   {
     extern bool transitionActive;
@@ -526,7 +590,7 @@ void processIRRemote()
       {
         if (cmd == "UP" || cmd == "DOWN")
         {
-          mainMenuSelection = 1 - mainMenuSelection;
+          mainMenuSelection = (mainMenuSelection + 1) % 3; // vòng 0->1->2->0
         }
         else if (cmd == "OK")
         {
@@ -540,14 +604,19 @@ void processIRRemote()
             configMode = 0; // Mặc định ở chế độ BEC
             currentMenu = CONFIG_MENU;
           }
-          else
+          else if (mainMenuSelection == 1)
           {
             currentMenu = TIME_SELECT_MENU;
-            timeSelectHour = true; // Mặc định chỉnh giờ
+            timeSelectHour = true;
             currentHour = irrigationTime / 60;
             currentMinute = irrigationTime % 60;
             timeInput = "";
             lastTimeInput = 0;
+          }
+          else
+          { // mainMenuSelection == 2 => TU DONG
+            currentMenu = AUTO_MENU;
+            autoMenuSelection = 0; // Mặc định là AUTO ON
           }
         }
       }
@@ -733,9 +802,42 @@ void processIRRemote()
           currentMenu = MAIN_MENU;
         }
       }
+      else if (currentMenu == AUTO_MENU)
+      {
+        if (cmd == "UP")
+        {
+          autoMenuSelection = (autoMenuSelection - 1 + 3) % 3;
+        }
+        else if (cmd == "DOWN")
+        {
+          autoMenuSelection = (autoMenuSelection + 1) % 3;
+        }
+        else if (cmd == "OK")
+        {
+          // Xác nhận lựa chọn AUTO
+          if (autoMenuSelection == AUTO_ON_OPT)
+          {
+            autoMode = AUTO_ON;
+          }
+          else if (autoMenuSelection == AUTO_OFF_OPT)
+          {
+            autoMode = AUTO_OFF;
+          }
+          else if (autoMenuSelection == AUTO_RESET_OPT)
+          {
+            if (autoMode == AUTO_ON)
+              autoCurrentSprinkler = 0;
+          }
+          saveConfig();
+          currentMenu = MAIN_MENU;
+        }
+        else if (cmd == "STAR")
+        {
+          currentMenu = MAIN_MENU;
+        }
+      }
       else if (currentMenu == RUNNING)
       {
-        // Pause/Resume cơ chế: nhấn OK để toggle pause
         if (cmd == "OK")
         {
           if (!paused)
