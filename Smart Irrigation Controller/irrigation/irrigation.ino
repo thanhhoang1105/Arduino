@@ -263,8 +263,9 @@ void updateMenuDisplay()
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+  int y = 0;
 
-  display.setCursor(110, 0);
+  display.setCursor(110, y);
   display.println(Blynk.connected() ? "ON" : "OFF");
 
   switch (currentMenu)
@@ -272,16 +273,18 @@ void updateMenuDisplay()
   case MAIN_MENU:
     if (mainMenuSelection == 0)
     {
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.println("> CAU HINH");
-      display.setCursor(0, 16);
+      y += 16;
+      display.setCursor(0, y);
       display.println("  KHOI DONG");
     }
     else
     {
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.println("  CAU HINH");
-      display.setCursor(0, 16);
+      y += 16;
+      display.setCursor(0, y);
       display.println("> KHOI DONG");
     }
     break;
@@ -291,9 +294,9 @@ void updateMenuDisplay()
     if (configMode == 0)
     {
       // Chế độ BEC
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.println("CAU HINH - BEC:");
-      int y = headerHeight; // Bắt đầu in danh sách từ dòng sau header
+      y += 16;
       // Cập nhật configScrollOffset để dòng được chọn luôn nằm trong vùng danh sách
       if (configSelected < configScrollOffset)
         configScrollOffset = configSelected;
@@ -316,9 +319,9 @@ void updateMenuDisplay()
     else
     {
       // Chế độ DELAY
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.println("CAU HINH - DELAY:");
-      int y = headerHeight;
+      y += 16;
       display.setCursor(0, y);
       display.print("Delay (s): ");
       display.println(transitionDelaySeconds);
@@ -361,7 +364,7 @@ void updateMenuDisplay()
       if (transRemaining < 0)
         transRemaining = 0;
       // Dòng 1: BEC mới đang mở
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.print("BEC ");
       display.print(nextBec + 1);
       display.println(" DANG MO");
@@ -374,11 +377,13 @@ void updateMenuDisplay()
       unsigned int rs = remain % 60;
       char timeStr[9];
       sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-      display.setCursor(0, 16);
+      y += 16;
+      display.setCursor(0, y);
       display.print("CON LAI: ");
       display.println(timeStr);
       // Dòng 3: BEC hiện đang đóng trong: transRemaining s
-      display.setCursor(0, 32);
+      y += 16;
+      display.setCursor(0, y);
       display.print("BEC ");
       display.print(currentBec + 1);
       display.print(" DONG TRONG: ");
@@ -387,7 +392,7 @@ void updateMenuDisplay()
     }
     else if (paused)
     {
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       display.println("RUNNING PAUSED");
       // Chuyển đổi pauseRemaining (ms) sang HH:MM:SS
       unsigned long remSec = pauseRemaining / 1000;
@@ -396,16 +401,17 @@ void updateMenuDisplay()
       unsigned int rs = remSec % 60;
       char timeStr[9];
       sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-      display.setCursor(0, 16);
+      y += 16;
+      display.setCursor(0, y);
       display.print("BEC ");
       display.print(runSprinklerIndices[currentRunIndex] + 1);
       display.print(" - CON LAI: ");
-      display.setCursor(0, 32);
+      y += 16;
       display.println(timeStr);
     }
     else
     {
-      display.setCursor(0, 0);
+      display.setCursor(0, y);
       if (currentRunIndex < runSprinklerCount)
       {
         display.print("BEC ");
@@ -419,13 +425,14 @@ void updateMenuDisplay()
         unsigned int rs = remain % 60;
         char timeStr[9];
         sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-        display.setCursor(0, 16);
+        y += 16;
+        display.setCursor(0, y);
         display.print("CON LAI: ");
         display.println(timeStr);
       }
       else
       {
-        display.setCursor(0, 0);
+        display.setCursor(0, y);
         display.println("XONG CHU TRINH");
         delay(2000);
         currentMenu = MAIN_MENU;
