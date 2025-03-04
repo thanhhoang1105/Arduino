@@ -407,6 +407,7 @@ void updateMenuDisplay()
       display.print(runSprinklerIndices[currentRunIndex] + 1);
       display.print(" - CON LAI: ");
       y += 16;
+      display.setCursor(0, y);
       display.println(timeStr);
     }
     else
