@@ -74,15 +74,42 @@ enum MenuState
   TIME_SELECT_MENU,
   AUTO_MENU,
   AUTO_TIME_MENU,
-  RUNNING,     // Tưới theo cấu hình thủ công
-  RUNNING_AUTO // Tưới tự động theo lịch
+  RUNNING,     // Chạy theo cấu hình trong CAU HINH (manual)
+  RUNNING_AUTO // Chạy tự động (TU DONG) theo lịch
 };
 MenuState currentMenu = MAIN_MENU;
-int mainMenuSelection = 0; // 0: CAU HINH, 1: KHOI DONG, 2: TU DONG
+int mainMenuSelection = 0; // 0: CAU HINH, 1: KHOI DONG THU CONG, 2: TU DONG
 
-// =========================
-// Auto Mode: AUTO_MENU
-// =========================
+// CONFIG_MENU:
+// configMode = 0: BEC, configMode = 1: DELAY
+int configMode = 0;
+bool allowedSprinklers[10];
+bool backupConfig[10];
+int configSelected = 0; // áp dụng khi configMode==0
+int configScrollOffset = 0;
+const int maxVisibleList = 2;    // Dành cho danh sách BEC (để hướng dẫn luôn hiện)
+int transitionDelaySeconds = 10; // Delay (giây) cho chuyển đổi (áp dụng khi configMode==1)
+
+// TIME_SELECT_MENU: dùng cho KHOI DONG THU CONG manual
+unsigned int irrigationTime = 120; // mặc định 120 phút (2 giờ)
+#define TIME_STEP_HOUR 1           // Bước tăng giảm giờ = 1
+#define TIME_STEP_MIN 15           // Bước tăng giảm phút = 15
+bool timeSelectHour = true;        // true: chỉnh giờ, false: chỉnh phút
+int currentHour = irrigationTime / 60;
+int currentMinute = irrigationTime % 60;
+String timeInput = "";
+unsigned long lastTimeInput = 0;
+
+// RUNNING (manual mode):
+unsigned long runStartTime = 0;
+int runSprinklerIndices[10]; // Lấy danh sách từ CAU HINH (allowedSprinklers)
+int runSprinklerCount = 0;
+int currentRunIndex = 0;
+bool cycleStarted = false;
+bool paused = false;
+unsigned long pauseRemaining = 0;
+
+// AUTO_MENU: trong TU DONG, các option: CHINH GIO, AUTO ON, AUTO OFF, RESET
 enum AutoOption
 {
   AUTO_TIME_OPT,
@@ -91,7 +118,7 @@ enum AutoOption
   AUTO_RESET_OPT
 };
 int autoMenuSelection = 0;
-const int maxVisibleAuto = 3; // hiển thị 3 dòng trong AUTO_MENU
+const int maxVisibleAuto = 3;
 int autoScrollOffset = 0;
 enum AutoMode
 {
@@ -101,44 +128,16 @@ enum AutoMode
 AutoMode autoMode = AUTO_OFF;
 int autoCurrentSprinkler = 0;
 
-// AUTO_TIME_MENU: chỉnh khoảng thời gian tự động
-int autoStartHour = 22; // FROM
-int autoEndHour = 4;    // TO
-// Thêm biến Duration: số giờ mỗi béc bật, mặc định 3 giờ.
-int autoSprayerDuration = 3;
-int autoTimeSelectField = 0; // 0: FROM, 1: TO, 2: DUR
+// AUTO_TIME_MENU: Giao diện chỉnh tự động: chỉnh FROM, TO, và DUR (thời gian mỗi béc bật)
+// FROM, TO: giờ (0-23)
+// DUR: thời gian mỗi béc bật, chia thành 2 trường: DUR_HOUR và DUR_MIN
+int autoStartHour = 22;      // FROM
+int autoEndHour = 4;         // TO
+int autoDurationHour = 3;    // DUR - giờ
+int autoDurationMinute = 0;  // DUR - phút
+int autoTimeSelectField = 0; // 0: FROM, 1: TO, 2: DUR_HOUR, 3: DUR_MIN
 String autoTimeInput = "";
 unsigned long lastAutoTimeInput = 0;
-
-// CONFIG_MENU:
-// configMode = 0: BEC, configMode = 1: DELAY
-int configMode = 0;
-bool allowedSprinklers[10];
-bool backupConfig[10];
-int configSelected = 0; // Áp dụng khi configMode==0
-int configScrollOffset = 0;
-const int maxVisibleList = 2;    // Dành cho danh sách BEC (để hướng dẫn luôn hiện)
-int transitionDelaySeconds = 10; // Delay (giây) cho chuyển đổi (áp dụng khi configMode==1)
-
-// TIME_SELECT_MENU:
-unsigned int irrigationTime = 120; // mặc định 120 phút (2 giờ)
-#define TIME_STEP_HOUR 1           // Bước tăng giảm giờ = 1
-#define TIME_STEP_MIN 15           // Bước tăng giảm phút = 15
-// Các biến cho chế độ chỉnh giờ/phút:
-bool timeSelectHour = true;              // true: chỉnh giờ, false: chỉnh phút
-int currentHour = irrigationTime / 60;   // Lưu giờ hiện tại
-int currentMinute = irrigationTime % 60; // Lưu phút hiện tại
-String timeInput = "";                   // Chuỗi nhập số tạm
-unsigned long lastTimeInput = 0;         // Thời gian nhập số cuối
-
-// RUNNING: (chế độ tưới thủ công)
-unsigned long runStartTime = 0; // Thời gian bắt đầu chu trình tưới
-int runSprinklerIndices[10];    // Danh sách béc được bật theo cấu hình
-int runSprinklerCount = 0;      // Số béc được bật
-int currentRunIndex = 0;        // Béc hiện đang chạy
-bool cycleStarted = false;      // Đã bắt đầu chu trình?
-bool paused = false;
-unsigned long pauseRemaining = 0;
 
 // =========================
 // Blynk Virtual Pin Callbacks
@@ -214,7 +213,9 @@ void saveConfig()
   preferences.putInt("autoSprinkler", autoCurrentSprinkler);
   preferences.putInt("autoStart", autoStartHour);
   preferences.putInt("autoEnd", autoEndHour);
-  preferences.putInt("autoDur", autoSprayerDuration);
+  // Lưu auto duration dưới dạng tổng số phút
+  int totalAutoDur = autoDurationHour * 60 + autoDurationMinute;
+  preferences.putInt("autoDur", totalAutoDur);
   preferences.end();
   Serial.println("Config saved.");
 }
@@ -232,7 +233,9 @@ void loadConfig()
   autoCurrentSprinkler = preferences.getInt("autoSprinkler", 0);
   autoStartHour = preferences.getInt("autoStart", 22);
   autoEndHour = preferences.getInt("autoEnd", 4);
-  autoSprayerDuration = preferences.getInt("autoDur", 3);
+  int totalAutoDur = preferences.getInt("autoDur", 180);
+  autoDurationHour = totalAutoDur / 60;
+  autoDurationMinute = totalAutoDur % 60;
   currentHour = irrigationTime / 60;
   currentMinute = irrigationTime % 60;
   preferences.end();
@@ -314,14 +317,14 @@ void updateMenuDisplay()
   switch (currentMenu)
   {
   case MAIN_MENU:
-    // MAIN_MENU có 3 mục: CAU HINH, KHOI DONG, TU DONG (hiển thị trạng thái AUTO)
+    // MAIN_MENU có 3 mục: CAU HINH, KHOI DONG THU CONG, TU DONG
     if (mainMenuSelection == 0)
     {
       display.setCursor(0, y);
       display.println("> CAU HINH");
       y += 16;
       display.setCursor(0, y);
-      display.println("  KHOI DONG");
+      display.println("  KHOI DONG THU CONG");
       y += 16;
       display.setCursor(0, y);
       display.print("  TU DONG (");
@@ -342,7 +345,7 @@ void updateMenuDisplay()
       display.println("  CAU HINH");
       y += 16;
       display.setCursor(0, y);
-      display.println("> KHOI DONG");
+      display.println("> KHOI DONG THU CONG");
       y += 16;
       display.setCursor(0, y);
       display.print("  TU DONG (");
@@ -363,7 +366,7 @@ void updateMenuDisplay()
       display.println("  CAU HINH");
       y += 16;
       display.setCursor(0, y);
-      display.println("  KHOI DONG");
+      display.println("  KHOI DONG THU CONG");
       y += 16;
       display.setCursor(0, y);
       display.print("> TU DONG (");
@@ -422,7 +425,6 @@ void updateMenuDisplay()
     display.println("CHON THOI GIAN");
     y += 16;
     display.setCursor(0, y);
-    // Hiển thị con trỏ cho trường đang chỉnh và hiển thị giờ, phút
     display.print(timeSelectHour ? ">" : " ");
     display.print("Hour: ");
     display.print(currentHour);
@@ -439,7 +441,6 @@ void updateMenuDisplay()
     display.println("TU DONG:");
     y += 16;
     const int maxVisibleAuto = 3;
-    // Cập nhật autoScrollOffset
     static int autoScrollOffset = 0;
     if (autoMenuSelection < autoScrollOffset)
       autoScrollOffset = autoMenuSelection;
@@ -458,10 +459,13 @@ void updateMenuDisplay()
 
   case AUTO_TIME_MENU:
   {
+    // Giao diện chỉnh giờ tự động: hiển thị "CHINH GIO:" và dòng dưới "FROM: XX  TO: YY  DUR: HH:MM"
+    int y = 0;
     display.setCursor(0, y);
     display.println("CHINH GIO:");
     y += 16;
     display.setCursor(0, y);
+    // FROM
     if (autoTimeSelectField == 0)
       display.print(">");
     else
@@ -469,29 +473,37 @@ void updateMenuDisplay()
     display.print("FROM: ");
     display.print(autoStartHour);
     display.print("  ");
+    // TO
     if (autoTimeSelectField == 1)
       display.print(">");
     else
       display.print(" ");
     display.print("TO: ");
-    display.println(autoEndHour);
+    display.print(autoEndHour);
     y += 16;
     display.setCursor(0, y);
+    // DUR_HOUR and DUR_MIN (Duration Hour and Duration Minute)
     if (autoTimeSelectField == 2)
       display.print(">");
     else
       display.print(" ");
-    display.print("DUR: ");
-    display.println(autoSprayerDuration);
-    y += 16;
-    display.setCursor(0, y);
+    display.print("DUR HOUR: ");
+    display.print(autoDurationHour);
+    display.print("  ");
+    if (autoTimeSelectField == 3)
+      display.print(">");
+    else
+      display.print(" ");
+    display.print("DUR MIN: ");
+    display.println(autoDurationMinute);
+    display.setCursor(0, SCREEN_HEIGHT - 16);
     display.println("*: Cancel  #: Save");
     break;
   }
 
   case RUNNING:
   {
-    // Chế độ RUNNING (cấu hình thủ công)
+    // RUNNING: chế độ thủ công (KHOI DONG THU CONG)
     extern bool transitionActive;
     extern unsigned long transitionStartTime;
     extern int transitionDelaySeconds;
@@ -505,12 +517,11 @@ void updateMenuDisplay()
       int transRemaining = transitionDelaySeconds - transElapsed;
       if (transRemaining < 0)
         transRemaining = 0;
-      // Dòng 1: BEC mới đang mở
       display.setCursor(0, y);
       display.print("BEC ");
       display.print(nextBec + 1);
       display.println(" DANG MO");
-      // Dòng 2: Thời gian còn lại của chu kỳ hiện hành
+      y += 16;
       unsigned long elapsed = (millis() - runStartTime) / 1000;
       unsigned long totalSec = irrigationTime * 60;
       unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
@@ -519,11 +530,9 @@ void updateMenuDisplay()
       unsigned int rs = remain % 60;
       char timeStr[9];
       sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-      y += 16;
       display.setCursor(0, y);
       display.print("CON LAI: ");
       display.println(timeStr);
-      // Dòng 3: BEC hiện đang đóng trong: transRemaining s
       y += 16;
       display.setCursor(0, y);
       display.print("BEC ");
@@ -535,21 +544,15 @@ void updateMenuDisplay()
     else if (paused)
     {
       display.setCursor(0, y);
-      display.println("RUNNING PAUSED");
-      // Chuyển đổi pauseRemaining (ms) sang HH:MM:SS
-      unsigned long remSec = pauseRemaining / 1000;
-      unsigned int rh = remSec / 3600;
-      unsigned int rm = (remSec % 3600) / 60;
-      unsigned int rs = remSec % 60;
-      char timeStr[9];
-      sprintf(timeStr, "%02u:%02u:%02u", rh, rm, rs);
-      y += 16;
-      display.setCursor(0, y);
       display.print("BEC ");
       display.print(runSprinklerIndices[currentRunIndex] + 1);
-      display.print(" - CON LAI: ");
+      display.println(" DANG DUNG");
+      unsigned long remSec = pauseRemaining / 1000;
+      char timeStr[9];
+      sprintf(timeStr, "%02u:%02u:%02u", remSec / 3600, (remSec % 3600) / 60, remSec % 60);
       y += 16;
       display.setCursor(0, y);
+      display.print("CON LAI: ");
       display.println(timeStr);
     }
     else
@@ -586,8 +589,7 @@ void updateMenuDisplay()
 
   case RUNNING_AUTO:
   {
-    // Chế độ RUNNING_AUTO (tưới tự động)
-    // Hiển thị: "AUTO RUNNING" ở dòng đầu, sau đó thông tin béc hiện đang chạy và thời gian còn lại.
+    // RUNNING_AUTO: chế độ tự động (TU DONG) chạy tất cả 10 béc theo lịch
     display.setCursor(0, 0);
     display.println("AUTO RUNNING");
     int yLine = 16;
@@ -597,7 +599,7 @@ void updateMenuDisplay()
     display.println(" DANG CHAY");
     yLine += 16;
     unsigned long elapsed = (millis() - runStartTime) / 1000;
-    unsigned long totalSec = autoSprayerDuration * 3600UL; // autoSprayerDuration giờ
+    unsigned long totalSec = (autoDurationHour * 60 + autoDurationMinute) * 60UL;
     unsigned long remain = (totalSec > elapsed) ? (totalSec - elapsed) : 0;
     unsigned int rh = remain / 3600;
     unsigned int rm = (remain % 3600) / 60;
@@ -781,7 +783,7 @@ void processIRRemote()
           currentMenu = MAIN_MENU;
         }
       }
-      // TIME_SELECT_MENU
+      // TIME_SELECT_MENU (cho KHOI DONG THU CONG manual)
       else if (currentMenu == TIME_SELECT_MENU)
       {
         if (cmd == "UP")
@@ -908,7 +910,7 @@ void processIRRemote()
           currentMenu = MAIN_MENU;
         }
       }
-      // AUTO_MENU
+      // AUTO_MENU (TU DONG)
       else if (currentMenu == AUTO_MENU)
       {
         if (cmd == "UP")
@@ -968,7 +970,13 @@ void processIRRemote()
           }
           else if (autoTimeSelectField == 2)
           {
-            autoSprayerDuration++;
+            autoDurationHour++;
+          }
+          else if (autoTimeSelectField == 3)
+          {
+            autoDurationMinute += 15;
+            if (autoDurationMinute >= 60)
+              autoDurationMinute = 59;
           }
         }
         else if (cmd == "DOWN")
@@ -985,30 +993,29 @@ void processIRRemote()
           }
           else if (autoTimeSelectField == 2)
           {
-            if (autoSprayerDuration > 1)
-              autoSprayerDuration--;
+            if (autoDurationHour > 0)
+              autoDurationHour--;
+          }
+          else if (autoTimeSelectField == 3)
+          {
+            if (autoDurationMinute >= 15)
+              autoDurationMinute -= 15;
+            else
+              autoDurationMinute = 0;
           }
         }
-        else if (cmd == "LEFT")
+        else if (cmd == "LEFT" || cmd == "RIGHT")
         {
-          autoTimeSelectField = (autoTimeSelectField - 1);
-          if (autoTimeSelectField < 0)
-            autoTimeSelectField = 2;
+          autoTimeSelectField = (autoTimeSelectField + 1) % 4;
           autoTimeInput = "";
           lastAutoTimeInput = 0;
         }
-        else if (cmd == "RIGHT")
-        {
-          autoTimeSelectField = (autoTimeSelectField + 1) % 3;
-          autoTimeInput = "";
-          lastAutoTimeInput = 0;
-        }
-        else if (cmd == "HASH") // Nhấn # để lưu
+        else if (cmd == "HASH")
         {
           saveConfig();
           currentMenu = AUTO_MENU;
         }
-        else if (cmd == "STAR") // Nhấn * để hủy
+        else if (cmd == "STAR")
         {
           currentMenu = AUTO_MENU;
         }
@@ -1035,14 +1042,19 @@ void processIRRemote()
             if (value < 24)
               autoEndHour = value;
           }
-          else
+          else if (autoTimeSelectField == 2)
           {
-            if (value > 0 && value < 100)
-              autoSprayerDuration = value;
+            if (value >= 0 && value < 100)
+              autoDurationHour = value;
+          }
+          else if (autoTimeSelectField == 3)
+          {
+            if (value >= 0 && value < 60)
+              autoDurationMinute = value;
           }
         }
       }
-      // RUNNING
+      // RUNNING (manual mode)
       else if (currentMenu == RUNNING)
       {
         if (cmd == "OK")
@@ -1086,9 +1098,37 @@ void processIRRemote()
       // RUNNING_AUTO
       else if (currentMenu == RUNNING_AUTO)
       {
-        if (cmd == "STAR")
+        if (cmd == "OK")
         {
-          // Tắt tất cả các relay
+          if (!paused)
+          {
+            paused = true;
+            // Thời gian chu kỳ của auto mode được tính từ autoSprayerDuration (đổi giờ sang mili giây)
+            unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
+            pauseRemaining = cycleDuration - (millis() - runStartTime);
+            digitalWrite(relayPins[10], LOW);
+            digitalWrite(relayPins[11], LOW);
+            Serial.println("RUNNING_AUTO paused.");
+          }
+          else
+          {
+            runStartTime = millis() - (((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL - pauseRemaining);
+            int bec = runSprinklerIndices[currentRunIndex];
+            if (bec < 6)
+            {
+              digitalWrite(relayPins[10], HIGH);
+            }
+            else
+            {
+              digitalWrite(relayPins[10], HIGH);
+              digitalWrite(relayPins[11], HIGH);
+            }
+            paused = false;
+            Serial.println("RUNNING_AUTO resumed.");
+          }
+        }
+        else if (cmd == "STAR")
+        {
           for (int i = 0; i < 12; i++)
           {
             digitalWrite(relayPins[i], LOW);
@@ -1177,7 +1217,8 @@ void updateRunningAuto()
     return;
   if (paused)
     return;
-  unsigned long cycleDuration = (unsigned long)autoSprayerDuration * 3600000UL; // autoSprayerDuration giờ
+  // Tính thời gian mỗi béc bật theo autoDuration (tính bằng phút)
+  unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
   if (!autoTransitionActive)
   {
@@ -1251,37 +1292,29 @@ void checkAutoMode()
     }
     if (waterDay && inAutoTime && currentMenu != RUNNING_AUTO)
     {
-      // Thiết lập RUNNING_AUTO
-      // Dùng autoSprayerDuration (giờ) làm thời gian mỗi béc
-      irrigationTime = autoSprayerDuration * 60;
-      runSprinklerCount = 0;
+      // Trong chế độ tự động, ignore CAU HINH: chạy tất cả 10 béc
+      runSprinklerCount = 10;
       for (int i = 0; i < 10; i++)
       {
-        if (allowedSprinklers[i])
-        {
-          runSprinklerIndices[runSprinklerCount++] = i;
-        }
+        runSprinklerIndices[i] = i;
       }
-      if (runSprinklerCount > 0)
+      currentMenu = RUNNING_AUTO;
+      currentRunIndex = 0;
+      runStartTime = millis();
+      paused = false;
+      digitalWrite(relayPins[runSprinklerIndices[currentRunIndex]], HIGH);
+      int bec = runSprinklerIndices[currentRunIndex];
+      if (bec < 6)
       {
-        currentMenu = RUNNING_AUTO;
-        currentRunIndex = 0;
-        runStartTime = millis();
-        paused = false;
-        digitalWrite(relayPins[runSprinklerIndices[currentRunIndex]], HIGH);
-        int bec = runSprinklerIndices[currentRunIndex];
-        if (bec < 6)
-        {
-          digitalWrite(relayPins[10], HIGH);
-          digitalWrite(relayPins[11], LOW);
-        }
-        else
-        {
-          digitalWrite(relayPins[10], HIGH);
-          digitalWrite(relayPins[11], HIGH);
-        }
-        Serial.println("Auto mode started (RUNNING_AUTO).");
+        digitalWrite(relayPins[10], HIGH);
+        digitalWrite(relayPins[11], LOW);
       }
+      else
+      {
+        digitalWrite(relayPins[10], HIGH);
+        digitalWrite(relayPins[11], HIGH);
+      }
+      Serial.println("Auto mode started (RUNNING_AUTO).");
     }
   }
 }
