@@ -121,6 +121,9 @@ unsigned long transitionStartTime = 0;
 // AUTO_RUN (auto)
 bool autoTransitionActive = false;
 unsigned long autoTransitionStartTime = 0;
+// Các biến cho chế độ RUNNING_AUTO (auto mode)
+int autoCurrentRunIndex = 0;   // Chỉ số béc hiện hành trong chế độ tự động
+int autoRunSprinklerCount = 0; // Số lượng béc được tưới trong chu trình auto
 enum AutoOption
 {
   AUTO_ON_OPT,
@@ -631,7 +634,7 @@ void updateMenuDisplay()
       y += 16;
       display.setCursor(0, y);
       display.print("BEC ");
-      display.print(runSprinklerIndices[currentRunIndex] + 1);
+      display.print(runSprinklerIndices[autoCurrentRunIndex] + 1);
       display.println(" DANG DUNG");
       y += 16;
       unsigned long remSec = (pauseRemaining / 1000) + 1;
@@ -643,7 +646,7 @@ void updateMenuDisplay()
     {
       if (autoTransitionActive)
       {
-        int nextSprinkler = runSprinklerIndices[currentRunIndex + 1];
+        int nextSprinkler = runSprinklerIndices[autoCurrentRunIndex + 1];
         unsigned long transElapsed = (millis() - autoTransitionStartTime) / 1000;
         int transRemaining = transitionDelaySeconds - transElapsed;
         if (transRemaining < 0)
@@ -666,7 +669,7 @@ void updateMenuDisplay()
         y += 16;
         display.setCursor(0, y);
         display.print("BEC ");
-        display.print(runSprinklerIndices[currentRunIndex] + 1);
+        display.print(runSprinklerIndices[autoCurrentRunIndex] + 1);
         display.print(" DONG TRONG: ");
         display.print(transRemaining);
         display.println("s");
@@ -679,7 +682,7 @@ void updateMenuDisplay()
         y += 16;
         display.setCursor(0, y);
         display.print("BEC ");
-        display.print(runSprinklerIndices[currentRunIndex] + 1);
+        display.print(runSprinklerIndices[autoCurrentRunIndex] + 1);
         display.println(" DANG CHAY");
         y += 16;
         unsigned long elapsed = (millis() - runStartTime) / 1000;
@@ -1212,7 +1215,6 @@ void updateRunningAuto()
   if (currentMenu != RUNNING_AUTO || paused)
     return;
 
-  // Tính thời gian hoạt động của béc hiện hành (tính theo mili giây)
   unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
 
@@ -1220,10 +1222,10 @@ void updateRunningAuto()
   {
     if (elapsedCycle >= cycleDuration)
     {
-      if (currentRunIndex + 1 < runSprinklerCount)
+      if (autoCurrentRunIndex + 1 < autoRunSprinklerCount)
       {
         // Chưa đến béc cuối cùng:
-        int nextSprinkler = runSprinklerIndices[currentRunIndex + 1];
+        int nextSprinkler = runSprinklerIndices[autoCurrentRunIndex + 1];
         activatePumpForSprinkler(nextSprinkler);
         // Bắt đầu giai đoạn chuyển tiếp (transition)
         autoTransitionActive = true;
@@ -1232,10 +1234,10 @@ void updateRunningAuto()
       else
       {
         // Đã chạy hết chu trình, tắt béc cuối cùng (và bơm)
-        int currentSprinkler = runSprinklerIndices[currentRunIndex];
+        int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
         turnOffCurrentSprinklerAndPump(currentSprinkler);
         // Cập nhật autoCurrentSprinkler theo vòng xoay của 10 béc
-        autoCurrentSprinkler = (autoCurrentSprinkler + runSprinklerCount) % 10;
+        autoCurrentSprinkler = (autoCurrentSprinkler + autoRunSprinklerCount) % 10;
         // Cập nhật NTP trước khi lấy epoch
         ntpClient.update();
         lastAutoCycleEndEpoch = ntpClient.getEpochTime();
@@ -1252,12 +1254,12 @@ void updateRunningAuto()
     if (transRemaining <= 0)
     {
       // Đã hết delay, tắt béc cũ (có thể tắt bơm cùng lúc nếu cần)
-      int currentSprinkler = runSprinklerIndices[currentRunIndex];
+      int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
       // Tắt béc hiện hành (chỉ tắt béc hiện hành, không ảnh hưởng đến béc mới đã bật)
       digitalWrite(relayPins[currentSprinkler], LOW);
 
       // Tiếp tục chuyển sang béc tiếp theo nếu có
-      currentRunIndex++;
+      autoCurrentRunIndex++;
       runStartTime = millis();
       autoTransitionActive = false;
     }
@@ -1326,21 +1328,21 @@ void checkAutoMode()
       sprinklersPerNight = 1;
 
     // Ở môi trường sản xuất, bạn sẽ luôn chạy chu trình 10 béc (vòng xoay)
-    // Trong mỗi đêm, runSprinklerCount = sprinklersPerNight, và autoCurrentSprinkler được cập nhật dần
-    runSprinklerCount = sprinklersPerNight;
-    if (runSprinklerCount > 10)
-      runSprinklerCount = 10;
+    // Trong mỗi đêm, autoRunSprinklerCount = sprinklersPerNight, và autoCurrentSprinkler được cập nhật dần
+    autoRunSprinklerCount = sprinklersPerNight;
+    if (autoRunSprinklerCount > 10)
+      autoRunSprinklerCount = 10;
 
     // Xây dựng danh sách thứ tự béc dựa trên autoCurrentSprinkler
-    for (int i = 0; i < runSprinklerCount; i++)
+    for (int i = 0; i < autoRunSprinklerCount; i++)
       runSprinklerIndices[i] = (autoCurrentSprinkler + i) % 10;
 
     currentMenu = RUNNING_AUTO;
-    currentRunIndex = 0;
+    autoCurrentRunIndex = 0;
     runStartTime = millis();
     paused = false;
     // Kích hoạt béc đầu tiên và bơm theo logic
-    activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
+    activatePumpForSprinkler(runSprinklerIndices[autoCurrentRunIndex]);
   }
 }
 
@@ -1358,15 +1360,18 @@ void saveConfig()
   preferences.putInt("delay", transitionDelaySeconds);
   preferences.putUInt("irrigationTime", irrigationTime);
   preferences.putInt("autoSprinkler", autoCurrentSprinkler);
-  // Lưu các giá trị auto với key thống nhất
+  // Lưu các giá trị auto (FROM, TO, DUR)
   preferences.putInt("autoStart", autoStartMinute);
   preferences.putInt("autoEnd", autoEndMinute);
   int totalAutoDur = autoDurationHour * 60 + autoDurationMinute;
   preferences.putInt("autoDur", totalAutoDur);
   // Lưu trạng thái autoMode (ON/OFF)
   preferences.putInt("autoMode", (int)autoMode);
-  // Lưu thời gian kết thúc chu trình auto (epoch, giây)
+  // Lưu thời gian kết thúc chu trình auto
   preferences.putUInt("lastAutoCycleEndEpoch", lastAutoCycleEndEpoch);
+  // Lưu các biến riêng cho chế độ RUNNING_AUTO:
+  preferences.putInt("autoCurrentRunIndex", autoCurrentRunIndex);
+  preferences.putInt("autoRunSprinklerCount", autoRunSprinklerCount);
   preferences.end();
   Serial.println("Config saved.");
 }
@@ -1398,8 +1403,12 @@ void loadConfig()
   autoDurMinTemp = autoDurationMinute;
   // Đọc trạng thái autoMode (ON/OFF)
   autoMode = (AutoMode)preferences.getInt("autoMode", AUTO_OFF);
-  // Đọc thời gian kết thúc chu trình auto từ ROM (epoch, giây)
+  // Đọc thời gian kết thúc chu trình auto từ ROM
   lastAutoCycleEndEpoch = preferences.getUInt("lastAutoCycleEndEpoch", 0);
+  // Đọc các biến riêng cho chế độ RUNNING_AUTO
+  autoCurrentRunIndex = preferences.getInt("autoCurrentRunIndex", 0);
+  autoRunSprinklerCount = preferences.getInt("autoRunSprinklerCount", 0);
+
   currentHour = irrigationTime / 60;
   currentMinute = irrigationTime % 60;
   preferences.end();
