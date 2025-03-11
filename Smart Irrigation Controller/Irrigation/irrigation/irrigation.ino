@@ -482,13 +482,13 @@ void updateMenuDisplay()
   case RUNNING:
   {
     int yLine = 0;
+    display.setCursor(0, yLine);
+    display.println("THU CONG");
     if (transitionActive)
     {
       int nextSprinkler = runSprinklerIndices[currentRunIndex + 1];
       unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
       int transRemaining = (transitionDelaySeconds > transElapsed) ? transitionDelaySeconds - transElapsed : 0;
-      display.setCursor(0, yLine);
-      display.println("THU CONG");
       yLine += 16;
       display.setCursor(0, yLine);
       display.print("BEC ");
@@ -511,8 +511,6 @@ void updateMenuDisplay()
     }
     else if (paused)
     {
-      display.setCursor(0, 0);
-      display.println("THU CONG");
       display.setCursor(0, 16);
       display.print("BEC ");
       display.print(runSprinklerIndices[currentRunIndex] + 1);
@@ -524,8 +522,6 @@ void updateMenuDisplay()
     }
     else
     {
-      display.setCursor(0, 0);
-      display.println("THU CONG");
       if (currentRunIndex < runSprinklerCount)
       {
         display.setCursor(0, 16);
@@ -552,9 +548,9 @@ void updateMenuDisplay()
   case RUNNING_AUTO:
   {
     display.setCursor(0, 0);
+    display.println("TU DONG");
     if (paused)
     {
-      display.println("TU DONG");
       display.setCursor(0, 16);
       display.print("BEC ");
       display.print(runSprinklerIndices[autoCurrentSprinkler] + 1);
@@ -564,19 +560,45 @@ void updateMenuDisplay()
       display.print("CON LAI: ");
       display.println(formatRemainingTime(remSec));
     }
+    else if (transitionActive)
+    {
+      int nextSprinkler = runSprinklerIndices[autoCurrentSprinkler + 1];
+      unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
+      int transRemaining = (transitionDelaySeconds > transElapsed) ? transitionDelaySeconds - transElapsed : 0;
+
+      // Dòng hiển thị: béc kế tiếp (nextSprinkler + 1) được bật ("MO")
+      display.setCursor(0, 16);
+      display.print("BEC ");
+      display.print(nextSprinkler + 1);
+      display.println(" MO");
+
+      // Hiển thị thời gian còn lại của chu trình béc hiện hành
+      unsigned long elapsed = (millis() - runStartTime) / 1000;
+      unsigned long totalSec = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60UL;
+      unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
+      display.setCursor(0, 32);
+      display.print("CON LAI: ");
+      display.println(formatRemainingTime(remain));
+
+      // Hiển thị thời gian chuyển tiếp của béc hiện hành
+      display.setCursor(0, 48);
+      display.print("BEC ");
+      display.print(runSprinklerIndices[autoCurrentSprinkler] + 1);
+      display.print(" DONG TRONG: ");
+      display.print(transRemaining);
+      display.println("s");
+    }
     else
     {
-      display.println("TU DONG");
+      // Khi đang chạy bình thường (không chuyển béc)
       display.setCursor(0, 16);
       display.print("BEC ");
       display.print(runSprinklerIndices[autoCurrentSprinkler] + 1);
       display.println(" CHAY");
 
-      // Tính thời gian còn lại
-      unsigned long elapsed = (millis() - runStartTime) / 1000; // đã trôi qua (giây)
+      unsigned long elapsed = (millis() - runStartTime) / 1000;
       unsigned long totalSec = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60UL;
       unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
-
       display.setCursor(0, 32);
       display.print("CON LAI: ");
       display.println(formatRemainingTime(remain));
@@ -1162,8 +1184,10 @@ void checkAutoMode()
       computeAutoCycle();
       if (autoRunSprinklerCount > 0)
       {
+        // Nếu giá trị lưu trước vượt quá số béc hiện có thì reset về 0
+        if (autoCurrentSprinkler >= autoRunSprinklerCount)
+          autoCurrentSprinkler = 0;
         currentMenu = RUNNING_AUTO;
-        autoCurrentSprinkler = 0;
         runStartTime = millis();
         autoCycleResting = false;
         activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
