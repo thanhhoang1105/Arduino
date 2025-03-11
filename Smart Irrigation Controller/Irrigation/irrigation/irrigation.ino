@@ -37,21 +37,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Cấu hình các chân Relay: 10 béc tưới, 2 bơm (chân relayPins[10] và relayPins[11])
 const int relayPins[12] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23, 26, 25};
 
-// ------------------ Cấu hình ACS712 ------------------
-// ACS712 được kết nối vào chân 34, nguồn 5V, ADC 12-bit (0-4095) và độ nhạy 100 mV/A (cho module 20A)
-ACS712 ACS(34, 5, 4095, 100);
-
-// Hàm hiệu chuẩn ACS712 (tự động tính midpoint khi không có dòng điện)
-void calibrateACS712()
-{
-  Serial.println("Calibrating ACS712...");
-  ACS.autoMidPoint(); // Tính midpoint tự động
-  Serial.print("MidPoint: ");
-  Serial.print(ACS.getMidPoint());
-  Serial.print(". Noise mV: ");
-  Serial.println(ACS.getNoisemV());
-}
-
 // ------------------ Cấu hình IR Remote ------------------
 const int RECV_PIN = 15; // Chân kết nối IR receiver
 // Hàm khởi tạo IR Remote
@@ -95,6 +80,7 @@ enum MenuState
   TIME_SELECT_MENU,
   AUTO_MENU,
   AUTO_TIME_MENU,
+  AUTO_CURRENT_SPRINKLER,
   RUNNING,
   RUNNING_AUTO
 };
@@ -162,6 +148,8 @@ enum AutoMode
 };
 AutoMode autoMode = AUTO_OFF;
 int autoCurrentSprinkler = 0;
+// Biến tạm cho autoCurrentSprinkler
+int autoCurrentSprinklerTemp = 0;
 
 // Cấu hình thời gian tự động (theo số phút)
 int autoStartMinute = 1320; // FROM: 22:00 (1320 phút)
@@ -179,9 +167,6 @@ int autoDurMinTemp = autoDurationMinute;
 String autoTimeInput = "";
 unsigned long lastAutoTimeInput = 0;
 unsigned long lastAutoCycleEndEpoch = 0; // Lưu thời gian kết thúc chu trình auto (epoch)
-
-// ------------------ Biến để theo dõi trạng thái tạm dừng do mất điện ------------------
-bool powerPaused = false; // true nếu đã tự động pause do mất điện
 
 // ===========================================================
 // Các hàm helper dùng chung
@@ -414,22 +399,35 @@ void updateMenuDisplay()
 
   case AUTO_MENU:
   {
-    display.setCursor(0, y);
+    display.setCursor(0, 0);
     display.println("TU DONG:");
-    y += 16;
+    int y = 16;
     static int autoScrollOffset = 0;
     if (autoMenuSelection < autoScrollOffset)
       autoScrollOffset = autoMenuSelection;
     if (autoMenuSelection >= autoScrollOffset + maxVisibleAuto)
       autoScrollOffset = autoMenuSelection - maxVisibleAuto + 1;
-    String options[4] = {"AUTO ON", "AUTO OFF", "RESET", "CHINH GIO"};
-    for (int i = autoScrollOffset; i < 4 && i < autoScrollOffset + maxVisibleAuto; i++)
+    String options[5] = {"AUTO ON", "AUTO OFF", "RESET", "CHINH BEC", "CHINH GIO"};
+    for (int i = autoScrollOffset; i < 5 && i < autoScrollOffset + maxVisibleAuto; i++)
     {
       display.setCursor(0, y);
       display.print(i == autoMenuSelection ? ">" : " ");
       display.println(options[i]);
       y += 16;
     }
+    break;
+  }
+
+  case AUTO_CURRENT_SPRINKLER:
+  {
+    display.setCursor(0, 0);
+    display.println("CHINH BEC:");
+    display.setCursor(0, 16);
+    // Hiển thị giá trị dạng 1 đến 10 (vì biến lưu từ 0 đến 9)
+    display.print("Value: ");
+    display.println(autoCurrentSprinklerTemp + 1);
+    display.setCursor(0, SCREEN_HEIGHT - 16);
+    display.println("*: Cancel  #: Save");
     break;
   }
 
@@ -868,12 +866,37 @@ void processIRRemote()
       else if (currentMenu == AUTO_MENU)
       {
         if (cmd == "UP")
-          autoMenuSelection = (autoMenuSelection - 1 + 4) % 4;
+          autoMenuSelection = (autoMenuSelection - 1 + 5) % 5;
         else if (cmd == "DOWN")
-          autoMenuSelection = (autoMenuSelection + 1) % 4;
+          autoMenuSelection = (autoMenuSelection + 1) % 5;
         else if (cmd == "OK")
         {
-          if (autoMenuSelection == AUTO_TIME_OPT)
+          if (autoMenuSelection == 0) // AUTO ON
+          {
+            autoMode = AUTO_ON;
+            saveConfig();
+            currentMenu = MAIN_MENU;
+          }
+          else if (autoMenuSelection == 1) // AUTO OFF
+          {
+            autoMode = AUTO_OFF;
+            saveConfig();
+            currentMenu = MAIN_MENU;
+          }
+          else if (autoMenuSelection == 2) // RESET
+          {
+            autoCurrentSprinkler = 0;
+            lastAutoCycleEndEpoch = 0;
+            saveConfig();
+            currentMenu = MAIN_MENU;
+            // Serial.println("Auto mode has been reset.");
+          }
+          else if (autoMenuSelection == 3)
+          {
+            currentMenu = AUTO_CURRENT_SPRINKLER;
+            autoCurrentSprinklerTemp = autoCurrentSprinkler; // load giá trị hiện tại vào biến tạm
+          }
+          else if (autoMenuSelection == 4) // CHINH GIO
           {
             autoTimeSelectField = 0;
             autoTimeEditPhase = 0;
@@ -883,30 +906,39 @@ void processIRRemote()
             autoEndMinTemp = autoEndMinute % 60;
             currentMenu = AUTO_TIME_MENU;
           }
-          else if (autoMenuSelection == AUTO_ON_OPT)
-          {
-            autoMode = AUTO_ON;
-            saveConfig();
-            currentMenu = MAIN_MENU;
-          }
-          else if (autoMenuSelection == AUTO_OFF_OPT)
-          {
-            autoMode = AUTO_OFF;
-            saveConfig();
-            currentMenu = MAIN_MENU;
-          }
-          else if (autoMenuSelection == AUTO_RESET_OPT)
-          {
-            autoCurrentSprinkler = 0;
-            lastAutoCycleEndEpoch = 0;
-            saveConfig();
-            currentMenu = MAIN_MENU;
-            // Serial.println("Auto mode has been reset.");
-          }
         }
         else if (cmd == "STAR")
           currentMenu = MAIN_MENU;
       }
+
+      else if (currentMenu == AUTO_CURRENT_SPRINKLER)
+      {
+        if (cmd == "UP")
+        {
+          // Nếu nhỏ hơn 9 (tương đương 10 khi hiển thị) thì tăng
+          if (autoCurrentSprinklerTemp < 9)
+            autoCurrentSprinklerTemp++;
+        }
+        else if (cmd == "DOWN")
+        {
+          // Nếu lớn hơn 0 (tương đương 1 khi hiển thị) thì giảm
+          if (autoCurrentSprinklerTemp > 0)
+            autoCurrentSprinklerTemp--;
+        }
+        else if (cmd == "HASH")
+        {
+          // Lưu giá trị mới và quay lại menu AUTO
+          autoCurrentSprinkler = autoCurrentSprinklerTemp;
+          saveConfig();
+          currentMenu = AUTO_MENU;
+        }
+        else if (cmd == "STAR")
+        {
+          // Hủy thay đổi và quay lại menu AUTO
+          currentMenu = AUTO_MENU;
+        }
+      }
+
       else if (currentMenu == AUTO_TIME_MENU)
       {
         if (cmd == "UP")
@@ -1149,25 +1181,32 @@ void updateRunningAuto()
   {
     if (elapsedCycle >= cycleDuration)
     {
+      // Nếu chưa đến béc cuối cùng, chuyển sang béc kế tiếp như cũ
       if (autoCurrentRunIndex + 1 < autoRunSprinklerCount)
       {
         int nextSprinkler = runSprinklerIndices[autoCurrentRunIndex + 1];
         activatePumpForSprinkler(nextSprinkler);
 
-        // Cập nhật autoCurrentSprinkler khi chuyển béc mới
-        autoCurrentSprinkler = nextSprinkler;
+        // Cập nhật béc hiện hành và khởi tạo giai đoạn chuyển tiếp
+        autoCurrentRunIndex++;
         autoTransitionActive = true;
         autoTransitionStartTime = millis();
         saveConfig();
       }
       else
       {
+        // Đang ở béc cuối cùng: tắt bơm, khởi tạo giai đoạn nghỉ trước khi bắt đầu lại chu trình
         int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
         turnOffCurrentSprinklerAndPump(currentSprinkler);
+        // Cập nhật thời gian kết thúc chu trình tự động nếu cần
         ntpClient.update();
         lastAutoCycleEndEpoch = ntpClient.getEpochTime();
-        saveConfig();
+
+        // Bắt đầu giai đoạn chuyển tiếp (nghỉ) cho béc cuối cùng
+        autoTransitionActive = true;
+        autoTransitionStartTime = millis();
         currentMenu = MAIN_MENU;
+        saveConfig();
       }
     }
   }
@@ -1177,11 +1216,22 @@ void updateRunningAuto()
     int transRemaining = transitionDelaySeconds - transElapsed;
     if (transRemaining <= 0)
     {
-      int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
-      digitalWrite(relayPins[currentSprinkler], LOW);
-      autoCurrentRunIndex++;
-      runStartTime = millis();
-      autoTransitionActive = false;
+      // Nếu không phải đang chuyển tiếp giữa các béc (nghĩa là đang ở béc cuối)
+      if (autoCurrentRunIndex + 1 < autoRunSprinklerCount)
+      {
+        int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
+        digitalWrite(relayPins[currentSprinkler], LOW);
+        runStartTime = millis();
+        autoTransitionActive = false;
+      }
+      else
+      {
+        // Sau khoảng thời gian nghỉ ở béc cuối, reset chu trình: quay về béc đầu tiên
+        autoCurrentRunIndex = 0;
+        runStartTime = millis();
+        autoTransitionActive = false;
+        activatePumpForSprinkler(runSprinklerIndices[autoCurrentRunIndex]);
+      }
     }
   }
 }
@@ -1352,139 +1402,6 @@ void syncRelayStatusToBlynk()
 }
 
 // ===========================================================
-// Hàm kiểm tra nguồn điện qua ACS712 và tự động pause/resume
-// ===========================================================
-// ----- Ngưỡng dòng điện (mA) với hiệu ứng hysteresis -----
-const float POWER_ON_THRESHOLD = 70.0;
-const float POWER_OFF_THRESHOLD = 60.0;
-
-// Biến toàn cục lưu trạng thái nguồn điện (true: có điện, false: mất điện)
-bool globalPowerState = true;
-
-// ----- Biến cho non-blocking ADC measurement -----
-const int numSamples = 10;        // Số mẫu cần lấy
-unsigned long lastSampleTime = 0; // Thời gian lấy mẫu cuối cùng
-int sampleCount = 0;              // Số mẫu đã lấy
-float sampleTotal = 0;            // Tổng các giá trị đo được
-
-// Hàm non-blocking cập nhật nguồn điện, được gọi trong vòng lặp (không delay)
-void updatePowerMeasurementNonBlocking()
-{
-  unsigned long now = millis();
-  // Lấy mẫu mỗi 5ms
-  if (now - lastSampleTime >= 5)
-  {
-    sampleTotal += ACS.mA_AC(); // Đọc giá trị dòng điện từ ACS712
-    sampleCount++;
-    lastSampleTime = now;
-
-    // Khi đủ số mẫu, tính trung bình và cập nhật trạng thái nguồn điện
-    if (sampleCount >= numSamples)
-    {
-      float averageCurrent = sampleTotal / sampleCount;
-      Serial.print("Dòng điện trung bình (mA): ");
-      Serial.println(averageCurrent);
-
-      // Hiệu ứng hysteresis: nếu vượt ngưỡng trên, coi là có điện; nếu dưới ngưỡng dưới, coi là mất điện;
-      // nếu ở giữa, giữ trạng thái trước đó.
-      static bool lastAvailable = true; // Giả sử ban đầu có điện
-      if (averageCurrent > POWER_ON_THRESHOLD)
-      {
-        lastAvailable = true;
-      }
-      else if (averageCurrent < POWER_OFF_THRESHOLD)
-      {
-        lastAvailable = false;
-      }
-      globalPowerState = lastAvailable;
-
-      // Reset bộ đếm cho chu kỳ lấy mẫu tiếp theo
-      sampleTotal = 0;
-      sampleCount = 0;
-    }
-  }
-}
-
-// Hàm kiểm tra nguồn điện và tự động pause/resume (sử dụng globalPowerState)
-void handlePowerMonitoring()
-{
-  static bool lastPowerState = true; // Giả sử ban đầu có điện
-  bool currentPowerState = globalPowerState;
-
-  // In ra khi trạng thái nguồn thay đổi
-  if (currentPowerState != lastPowerState)
-  {
-    Serial.print("Power state changed: ");
-    Serial.println(currentPowerState ? "Available" : "Not available");
-    lastPowerState = currentPowerState;
-  }
-
-  // Nếu mất điện và hệ thống đang chạy (RUNNING hoặc RUNNING_AUTO) mà chưa bị pause, thực hiện pause
-  if (!currentPowerState && !paused &&
-      (currentMenu == RUNNING || currentMenu == RUNNING_AUTO))
-  {
-    paused = true;
-    powerPaused = true;
-    if (currentMenu == RUNNING)
-    {
-      unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
-      pauseRemaining = cycleDuration - (millis() - runStartTime);
-    }
-    else if (currentMenu == RUNNING_AUTO)
-    {
-      unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
-      pauseRemaining = cycleDuration - (millis() - runStartTime);
-    }
-    // Tắt tất cả relay khi chuyển sang pause
-    for (int i = 0; i < 12; i++)
-    {
-      digitalWrite(relayPins[i], LOW);
-    }
-    Serial.println("Paused due to power loss.");
-  }
-
-  // Nếu nguồn điện đã khôi phục và hệ thống đang bị pause do mất điện, tiến hành resume
-  // Chú ý: Với chế độ RUNNING_AUTO, chỉ resume nếu autoMode vẫn đang bật (AUTO_ON)
-  if (currentPowerState && powerPaused && paused &&
-      (currentMenu == RUNNING || (currentMenu == RUNNING_AUTO && autoMode == AUTO_ON)))
-  {
-    if (currentMenu == RUNNING)
-    {
-      // Xử lý chuyển (transfer) nếu đang trong quá trình chuyển giữa các béc
-      if (transitionActive)
-      {
-        int currentSprinkler = runSprinklerIndices[currentRunIndex];
-        // Hoàn tất chuyển: bật lại relay của béc hiện hành (hoặc tắt tùy logic của bạn)
-        digitalWrite(relayPins[currentSprinkler], HIGH);
-        transitionActive = false;
-        Serial.println("Completed transfer during resume (RUNNING).");
-      }
-      runStartTime = millis() - ((unsigned long)irrigationTime * 60000UL - pauseRemaining);
-      int bec = runSprinklerIndices[currentRunIndex];
-      activatePumpForSprinkler(bec);
-    }
-    else if (currentMenu == RUNNING_AUTO)
-    {
-      // Chỉ resume auto nếu autoMode vẫn bật
-      if (autoTransitionActive)
-      {
-        int currentSprinkler = runSprinklerIndices[autoCurrentRunIndex];
-        // Hoàn tất chuyển: bật relay của béc hiện hành
-        digitalWrite(relayPins[currentSprinkler], HIGH);
-        autoTransitionActive = false;
-        Serial.println("Completed transfer during resume (RUNNING_AUTO).");
-      }
-      runStartTime = millis() - (((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL - pauseRemaining);
-      int bec = runSprinklerIndices[autoCurrentRunIndex];
-      activatePumpForSprinkler(bec);
-    }
-    paused = false;
-    powerPaused = false;
-    Serial.println("Resumed after power restored.");
-  }
-}
-
-// ===========================================================
 // Blynk Timer và hàm setup, loop chính
 // ===========================================================
 BlynkTimer timer;
@@ -1492,9 +1409,6 @@ BlynkTimer timer;
 void setup()
 {
   Serial.begin(115200);
-
-  // Hiệu chuẩn ACS712 ngay khi khởi động
-  calibrateACS712();
 
   // Khởi tạo các chân Relay (OUTPUT) và tắt tất cả
   for (int i = 0; i < 12; i++)
@@ -1530,8 +1444,7 @@ void setup()
   ntpClient.update();
 
   // Cài đặt các khoảng thời gian gọi hàm (timer)
-  timer.setInterval(1000L, updatePowerMeasurementNonBlocking); // Cập nhật nguồn điện mỗi 1 giây
-  timer.setInterval(500L, updateMenuDisplay);                  // Cập nhật OLED mỗi 500ms
+  timer.setInterval(500L, updateMenuDisplay); // Cập nhật OLED mỗi 500ms
   timer.setInterval(30000L, []()
                     { ntpClient.update(); }); // Cập nhật NTP mỗi 30 giây
 }
@@ -1552,7 +1465,4 @@ void loop()
   checkPumpProtection();    // Kiểm tra bảo vệ bơm
   syncRelayStatusToBlynk(); // Đồng bộ trạng thái relay với Blynk
   checkAutoMode();          // Kiểm tra và kích hoạt Auto Mode nếu cần
-
-  // Cập nhật và xử lý trạng thái nguồn điện
-  handlePowerMonitoring();
 }
