@@ -1101,30 +1101,7 @@ void updateRunningAuto()
   if (currentMenu != RUNNING_AUTO || paused)
     return;
 
-  // Nếu đang nghỉ giữa chu trình
-  if (autoCycleResting)
-  {
-    if (millis() - autoCycleEndTime >= (unsigned long)autoRestTimeMinute * 60000UL)
-    {
-      // Nghỉ xong, tính lại chu trình Auto và bắt đầu lại từ béc 1
-      computeAutoCycle();
-      if (autoRunSprinklerCount > 0)
-      {
-        autoCurrentSprinkler = 0;
-        runStartTime = millis();
-        autoCycleResting = false;
-        activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
-        saveConfig();
-      }
-      else
-      {
-        currentMenu = MAIN_MENU;
-      }
-    }
-    return;
-  }
-
-  // Đang trong chu trình tưới
+  // Tính thời gian tưới cho béc hiện hành (ms)
   unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
 
@@ -1132,33 +1109,42 @@ void updateRunningAuto()
   {
     if (elapsedCycle >= cycleDuration)
     {
+      // Nếu còn béc kế tiếp thì chuyển sang béc đó
       if (autoCurrentSprinkler + 1 < autoRunSprinklerCount)
       {
-        // Chuyển sang béc kế tiếp
         activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler + 1]);
         transitionActive = true;
         transitionStartTime = millis();
       }
       else
       {
-        // Đã tưới xong béc cuối, tắt relay và bắt đầu nghỉ
+        // Đã tưới xong béc cuối, tắt relay, đánh dấu hoàn thành chu trình,
+        // reset autoCurrentSprinkler về 0 và chuyển về MAIN_MENU
         turnOffCurrentSprinklerAndPump(runSprinklerIndices[autoCurrentSprinkler]);
         autoCycleResting = true;
         autoCycleEndTime = millis();
+        autoCurrentSprinkler = 0;
+        currentMenu = MAIN_MENU;
+        saveConfig();
       }
     }
   }
   else
   {
+    // Đang trong giai đoạn chuyển tiếp giữa 2 béc
     unsigned long transElapsed = (millis() - transitionStartTime) / 1000;
     if (transElapsed >= transitionDelaySeconds)
     {
       digitalWrite(relayPins[runSprinklerIndices[autoCurrentSprinkler]], LOW);
-      autoCurrentSprinkler++;
+      autoCurrentSprinkler++; // Chuyển sang béc kế tiếp
       runStartTime = millis();
       transitionActive = false;
-      activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
-      saveConfig();
+      // Nếu chuyển sang béc mới nằm trong phạm vi(1-10), bật béc đó và cập nhật cấu hình
+      if (autoCurrentSprinkler < autoRunSprinklerCount)
+      {
+        activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
+        saveConfig();
+      }
     }
   }
 }
@@ -1168,10 +1154,12 @@ void checkAutoMode()
 {
   if (autoMode == AUTO_OFF)
     return;
+
   unsigned long epoch = ntpClient.getEpochTime();
   tm *lt = localtime((time_t *)&epoch);
   int currentMinutes = lt->tm_hour * 60 + lt->tm_min;
-  bool inAutoTime;
+  bool inAutoTime = false;
+
   if (autoStartMinute < autoEndMinute)
     inAutoTime = (currentMinutes >= autoStartMinute && currentMinutes < autoEndMinute);
   else
@@ -1179,19 +1167,43 @@ void checkAutoMode()
 
   if (inAutoTime)
   {
+    // Nếu không đang chạy chu trình Auto
     if (currentMenu != RUNNING_AUTO)
     {
-      computeAutoCycle();
-      if (autoRunSprinklerCount > 0)
+      // Nếu chu trình Auto đã hoàn thành (đã nghỉ) thì kiểm tra thời gian nghỉ
+      if (autoCycleResting)
       {
-        // Nếu giá trị lưu trước vượt quá số béc hiện có thì reset về 0
-        if (autoCurrentSprinkler >= autoRunSprinklerCount)
-          autoCurrentSprinkler = 0;
-        currentMenu = RUNNING_AUTO;
-        runStartTime = millis();
-        autoCycleResting = false;
-        activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
-        saveConfig();
+        // Nếu đã hoàn thành chu trình và đủ thời gian nghỉ, khởi động lại từ béc 1
+        if (millis() - autoCycleEndTime >= (unsigned long)autoRestTimeMinute * 60000UL)
+        {
+          // Nghỉ xong, tính lại chu trình Auto và bắt đầu mới từ béc 1
+          computeAutoCycle();
+          if (autoRunSprinklerCount > 0)
+          {
+            autoCurrentSprinkler = 0;
+            runStartTime = millis();
+            autoCycleResting = false;
+            currentMenu = RUNNING_AUTO;
+            activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
+            saveConfig();
+          }
+        }
+      }
+      else
+      {
+        // Nếu chưa có chu trình Auto, khởi động mới
+        computeAutoCycle();
+        if (autoRunSprinklerCount > 0)
+        {
+          // Nếu giá trị autoCurrentSprinkler đã vượt phạm vi thì reset về 0
+          if (autoCurrentSprinkler >= autoRunSprinklerCount)
+            autoCurrentSprinkler = 0;
+          currentMenu = RUNNING_AUTO;
+          runStartTime = millis();
+          autoCycleResting = false;
+          activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
+          saveConfig();
+        }
       }
     }
   }
