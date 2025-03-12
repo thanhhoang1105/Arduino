@@ -1155,15 +1155,15 @@ void checkAutoMode()
   if (autoMode == AUTO_OFF)
     return;
 
-  unsigned long epoch = ntpClient.getEpochTime();
-  tm *lt = localtime((time_t *)&epoch);
-  int currentMinutes = lt->tm_hour * 60 + lt->tm_min;
+  int currentHourRT = ntpClient.getHours();
+  int currentMinuteRT = ntpClient.getMinutes();
+  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
   bool inAutoTime = false;
 
   if (autoStartMinute < autoEndMinute)
-    inAutoTime = (currentMinutes >= autoStartMinute && currentMinutes < autoEndMinute);
+    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
   else
-    inAutoTime = (currentMinutes >= autoStartMinute || currentMinutes < autoEndMinute);
+    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
 
   if (inAutoTime)
   {
@@ -1356,7 +1356,9 @@ void loop()
   timer.run();
   processIRRemote();
 
-  if (currentMenu == RUNNING_AUTO)
+  if (currentMenu == RUNNING)
+    ; // Chế độ RUNNING (thủ công) được xử lý riêng (code không nằm ở đây)
+  else if (currentMenu == RUNNING_AUTO)
     updateRunningAuto();
 
   checkPumpProtection();
