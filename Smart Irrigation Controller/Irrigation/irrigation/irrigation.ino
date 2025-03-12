@@ -189,8 +189,6 @@ int autoDurationHour = 3;   // DUR: 3 giờ
 int autoDurationMinute = 0;
 
 // Phân tích chu trình Auto:
-// Tính số béc tưới dựa vào khoảng thời gian từ FROM đến TO và DUR (tối đa 10)
-int autoRunSprinklerCount = 0;
 
 // Cấu hình thời gian nghỉ giữa các chu trình Auto (REST)
 // Ban đầu mặc định 0:05 (5 phút) – cho phép chỉnh theo định dạng [HH:MM]
@@ -798,6 +796,7 @@ void processAutoMenuIR(const String &cmd)
     { // RESET
       autoCurrentSprinkler = 0;
       lastAutoCycleEndEpoch = 0;
+      runSprinklerIndices[0] = ;
       saveConfig();
       currentMenu = MAIN_MENU;
     }
@@ -834,6 +833,7 @@ void processAutoCurrentSprinklerIR(const String &cmd)
   else if (cmd == "HASH")
   {
     autoCurrentSprinkler = autoCurrentSprinklerTemp;
+    runSprinklerIndices[autoCurrentSprinkler] = autoCurrentSprinkler;
     saveConfig();
     currentMenu = AUTO_MENU;
   }
@@ -1071,31 +1071,23 @@ void processIRRemote()
   IrReceiver.resume();
 }
 
-// ------------------ Hàm tính toán chu trình Auto ------------------
-void computeAutoCycle()
+// ------------------ Hàm isInAutoTime ------------------
+bool isInAutoTime()
 {
-  // Tính khoảng thời gian khả dụng (tính theo phút)
-  int availableTime;
+  int currentHourRT = ntpClient.getHours();
+  int currentMinuteRT = ntpClient.getMinutes();
+  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
+  bool inAutoTime = false;
+
   if (autoStartMinute < autoEndMinute)
-    availableTime = autoEndMinute - autoStartMinute;
+    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
   else
-    availableTime = (1440 - autoStartMinute) + autoEndMinute;
+    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
 
-  int autoDur = autoDurationHour * 60 + autoDurationMinute;
-  int count = availableTime / autoDur;
-  if (count > 10)
-    count = 10;
-
-  autoRunSprinklerCount = 0;
-  // Chỉ thêm các béc được bật (theo thứ tự từ 0 đến 9)
-  for (int i = 0; i < 10 && autoRunSprinklerCount < count; i++)
-  {
-    if (allowedSprinklers[i])
-      runSprinklerIndices[autoRunSprinklerCount++] = i;
-  }
+  return inAutoTime;
 }
 
-// ------------------ Cập nhật chu trình RUNNING_AUTO (non-blocking) ------------------
+// ------------------ Hàm cập nhật chu trình RUNNING_AUTO (non-blocking) ------------------
 void updateRunningAuto()
 {
   if (currentMenu != RUNNING_AUTO || paused)
@@ -1105,25 +1097,39 @@ void updateRunningAuto()
   unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
 
+  bool inAutoTime = isInAutoTime();
+
   if (!transitionActive)
   {
     if (elapsedCycle >= cycleDuration)
     {
-      // Nếu còn béc kế tiếp thì chuyển sang béc đó
-      if (autoCurrentSprinkler + 1 < autoRunSprinklerCount)
+      if (inAutoTime)
       {
-        activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler + 1]);
-        transitionActive = true;
-        transitionStartTime = millis();
+        // Nếu còn béc kế tiếp (theo số 10, tức index 0..9) thì chuyển sang béc mới
+        if (autoCurrentSprinkler + 1 < 10)
+        {
+          activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler + 1]);
+          transitionActive = true;
+          transitionStartTime = millis();
+        }
+        else
+        {
+          // Đã tưới xong béc cuối, tắt relay, đánh dấu chu trình đã hoàn thành,
+          // reset autoCurrentSprinkler và chuyển về MAIN_MENU
+          turnOffCurrentSprinklerAndPump(runSprinklerIndices[autoCurrentSprinkler]);
+          autoCycleResting = true;
+          autoCycleEndTime = millis();
+          autoCurrentSprinkler = 0;
+          currentMenu = MAIN_MENU;
+          saveConfig();
+        }
       }
       else
       {
-        // Đã tưới xong béc cuối, tắt relay, đánh dấu hoàn thành chu trình,
-        // reset autoCurrentSprinkler về 0 và chuyển về MAIN_MENU
+        // Nếu không còn inAutoTime, béc hiện hành vẫn chạy hết chu trình của nó
+        // Sau khi elapsedCycle >= cycleDuration, tắt relay và kết thúc chu trình
         turnOffCurrentSprinklerAndPump(runSprinklerIndices[autoCurrentSprinkler]);
-        autoCycleResting = true;
-        autoCycleEndTime = millis();
-        autoCurrentSprinkler = 0;
+        // (Có thể tăng autoCurrentSprinkler nếu cần, nhưng ở đây chúng ta kết thúc chu trình)
         currentMenu = MAIN_MENU;
         saveConfig();
       }
@@ -1136,11 +1142,10 @@ void updateRunningAuto()
     if (transElapsed >= transitionDelaySeconds)
     {
       digitalWrite(relayPins[runSprinklerIndices[autoCurrentSprinkler]], LOW);
-      autoCurrentSprinkler++; // Chuyển sang béc kế tiếp
+      autoCurrentSprinkler++; // chuyển sang béc kế tiếp
       runStartTime = millis();
       transitionActive = false;
-      // Nếu chuyển sang béc mới nằm trong phạm vi(1-10), bật béc đó và cập nhật cấu hình
-      if (autoCurrentSprinkler < autoRunSprinklerCount)
+      if (autoCurrentSprinkler < 10)
       {
         activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
         saveConfig();
@@ -1149,73 +1154,47 @@ void updateRunningAuto()
   }
 }
 
-// ------------------ Kiểm tra Auto Mode ------------------
+// ------------------ Hàm kiểm tra Auto Mode ------------------
 void checkAutoMode()
 {
   if (autoMode == AUTO_OFF)
     return;
 
-  int currentHourRT = ntpClient.getHours();
-  int currentMinuteRT = ntpClient.getMinutes();
-  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
-  bool inAutoTime = false;
-
-  if (autoStartMinute < autoEndMinute)
-    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
-  else
-    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
+  bool inAutoTime = isInAutoTime();
 
   if (inAutoTime)
   {
-    // Nếu không đang chạy chu trình Auto
+    // Nếu không đang chạy chu trình Auto, khởi động chu trình mới
     if (currentMenu != RUNNING_AUTO)
     {
-      // Nếu chu trình Auto đã hoàn thành (đã nghỉ) thì kiểm tra thời gian nghỉ
+      // Nếu chu trình đã nghỉ và đủ thời gian nghỉ, reset về béc đầu tiên
       if (autoCycleResting)
       {
-        // Nếu đã hoàn thành chu trình và đủ thời gian nghỉ, khởi động lại từ béc 1
         if (millis() - autoCycleEndTime >= (unsigned long)autoRestTimeMinute * 60000UL)
         {
-          // Nghỉ xong, tính lại chu trình Auto và bắt đầu mới từ béc 1
-          computeAutoCycle();
-          if (autoRunSprinklerCount > 0)
-          {
-            autoCurrentSprinkler = 0;
-            runStartTime = millis();
-            autoCycleResting = false;
-            currentMenu = RUNNING_AUTO;
-            activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
-            saveConfig();
-          }
-        }
-      }
-      else
-      {
-        // Nếu chưa có chu trình Auto, khởi động mới
-        computeAutoCycle();
-        if (autoRunSprinklerCount > 0)
-        {
-          // Nếu giá trị autoCurrentSprinkler đã vượt phạm vi thì reset về 0
-          if (autoCurrentSprinkler >= autoRunSprinklerCount)
-            autoCurrentSprinkler = 0;
-          currentMenu = RUNNING_AUTO;
+          autoCurrentSprinkler = 0;
           runStartTime = millis();
           autoCycleResting = false;
+          currentMenu = RUNNING_AUTO;
           activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
           saveConfig();
         }
       }
+      else
+      {
+        // Nếu chưa có chu trình Auto, hoặc chu trình mới bắt đầu, reset autoCurrentSprinkler nếu cần
+        if (autoCurrentSprinkler >= 10)
+          autoCurrentSprinkler = 0;
+        currentMenu = RUNNING_AUTO;
+        runStartTime = millis();
+        autoCycleResting = false;
+        activatePumpForSprinkler(runSprinklerIndices[autoCurrentSprinkler]);
+        saveConfig();
+      }
     }
   }
-  else
-  {
-    if (currentMenu == RUNNING_AUTO)
-    {
-      for (int i = 0; i < 12; i++)
-        digitalWrite(relayPins[i], LOW);
-      currentMenu = MAIN_MENU;
-    }
-  }
+  // Nếu không còn inAutoTime, ta không can thiệp nếu chu trình AUTO đang chạy
+  // (để béc hiện hành được chạy hết chu trình tự nhiên)
 }
 
 // ------------------ Lưu & tải cấu hình ------------------
@@ -1249,6 +1228,21 @@ void loadConfig()
     String key = "sprayer" + String(i);
     allowedSprinklers[i] = preferences.getBool(key.c_str(), false);
   }
+  // Nếu tất cả đều false, mặc định bật béc 1
+  bool anyEnabled = false;
+  for (int i = 0; i < 10; i++)
+  {
+    if (allowedSprinklers[i])
+    {
+      anyEnabled = true;
+      break;
+    }
+  }
+  if (!anyEnabled)
+  {
+    allowedSprinklers[0] = true;
+  }
+
   transitionDelaySeconds = preferences.getInt("delay", 10);
   transitionDelayTemp = transitionDelaySeconds;
   irrigationTime = preferences.getUInt("irrigationTime", 120);
