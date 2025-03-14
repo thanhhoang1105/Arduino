@@ -1,9 +1,11 @@
-// ------------------ Thông tin cấu hình Blynk ------------------
+// ==================== THÔNG TIN CẤU HÌNH VÀ THƯ VIỆN ====================
+
+// Cấu hình Blynk
 #define BLYNK_TEMPLATE_ID "TMPL6ZR2keF5J"
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
 #define BLYNK_AUTH_TOKEN "x-Uc3uA1wCZtbDWniO6yWTDrLHsVqOJ-"
 
-// ------------------ Thư viện sử dụng ------------------
+// Thư viện sử dụng
 #include <Preferences.h>
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
@@ -15,39 +17,45 @@
 #include <NTPClient.h>
 #include "ACS712.h"
 
-// ------------------ Cấu hình chung ------------------
+// ==================== CẤU HÌNH CHUNG ====================
 
 // WiFi và Blynk
 char ssid[] = "VU ne";
 char pass[] = "12341234";
 
-// Preferences dùng để lưu cấu hình vào flash
+// Đối tượng Preferences để lưu cấu hình trên flash
 Preferences preferences;
 
-// NTP client (múi giờ +7)
+// -------------------- NTP Client --------------------
+// Khởi tạo NTP client với múi giờ +7 (7 * 3600 giây) và khoảng cập nhật 60s
 WiFiUDP ntpUDP;
 NTPClient ntpClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000);
 
-// Màn hình OLED SSD1306
+// -------------------- OLED Display --------------------
+// Kích thước màn hình và reset (OLED_RESET = -1 khi dùng I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Các chân Relay: 10 béc tưới và 2 bơm (relayPins[10] và relayPins[11])
+// -------------------- Các chân Relay --------------------
+// Dãy chân dùng cho 10 béc tưới và 2 bơm
 const int relayPins[12] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23, 26, 25};
 
-// ------------------ Cấu hình IR Remote ------------------
-const int RECV_PIN = 15; // Chân IR receiver
-const unsigned long debounceTime = 500;
+// -------------------- Cấu hình IR Remote --------------------
+const int RECV_PIN = 15;                // Chân kết nối IR receiver
+const unsigned long debounceTime = 500; // Thời gian debounce cho nút bấm IR
 unsigned long lastCode = 0, lastReceiveTime = 0;
 
+// Hàm khởi tạo IR receiver
 void setupIR()
 {
   IrReceiver.begin(RECV_PIN, ENABLE_LED_FEEDBACK);
 }
 
-// Định nghĩa mã IR cho các nút
+// ==================== ĐỊNH NGHĨA MÃ VÀ HÀM HỖ TRỢ IR ====================
+
+// Định nghĩa mã IR cho các nút (sử dụng UL để đảm bảo kiểu số không dấu)
 #define IR_CODE_1 3125149440UL
 #define IR_CODE_2 3108437760UL
 #define IR_CODE_3 3091726080UL
@@ -66,7 +74,7 @@ void setupIR()
 #define IR_CODE_LEFT 4144561920UL
 #define IR_CODE_OK 3810328320UL
 
-// Ánh xạ mã IR sang chuỗi lệnh
+// Hàm ánh xạ mã IR sang chuỗi lệnh
 String mapIRCodeToCommand(uint32_t code)
 {
   switch (code)
@@ -110,9 +118,9 @@ String mapIRCodeToCommand(uint32_t code)
   }
 }
 
-// ------------------ Các biến trạng thái ------------------
+// ==================== BIẾN TOÁN VÀ TRẠNG THÁI HỆ THỐNG ====================
 
-// Menu chính
+// Định nghĩa trạng thái menu chính của hệ thống
 enum MenuState
 {
   MAIN_MENU,
@@ -126,63 +134,63 @@ enum MenuState
 };
 MenuState currentMenu = MAIN_MENU;
 
-// MAIN_MENU
-int mainMenuSelection = 0;
+// -------------------- Dữ liệu cho menu thủ công --------------------
+int mainMenuSelection = 0; // Lựa chọn trong MAIN_MENU
 
-// CONFIG_MENU (chỉ áp dụng cho chế độ thủ công)
-int configMode = 0; // 0: béc tưới, 1: delay
-bool allowedSprinklers[10] = {false};
-bool backupConfig[10] = {false};
-int configSelected = 0;
-int configScrollOffset = 0;
-const int maxVisibleList = 2;
-int transitionDelaySeconds = 10;
-int transitionDelayTemp = 10;
+// CONFIG_MENU (chế độ thủ công)
+int configMode = 0;                   // 0: bật/tắt béc tưới, 1: chỉnh delay chuyển béc
+bool allowedSprinklers[10] = {false}; // Trạng thái ON/OFF của các béc tưới
+bool backupConfig[10] = {false};      // Backup cấu hình tạm
+int configSelected = 0;               // Vị trí hiện hành trong menu
+int configScrollOffset = 0;           // Offset hiển thị menu
+const int maxVisibleList = 2;         // Số mục hiển thị tối đa
+int transitionDelaySeconds = 10;      // Thời gian delay chuyển béc (giây)
+int transitionDelayTemp = 10;         // Biến tạm chỉnh delay
 
 // TIME_SELECT_MENU (chế độ thủ công)
-unsigned int irrigationTime = 120; // (phút)
-#define TIME_STEP_HOUR 1
-#define TIME_STEP_MIN 15
+unsigned int irrigationTime = 120; // Thời gian tưới (phút)
+#define TIME_STEP_HOUR 1           // Bước tăng giảm giờ
+#define TIME_STEP_MIN 15           // Bước tăng giảm phút
 int currentHour = irrigationTime / 60;
 int currentMinute = irrigationTime % 60;
-bool timeSelectHour = true;
+bool timeSelectHour = true; // Chọn chỉnh giờ hay phút
 int tempHour = currentHour, tempMinute = currentMinute;
 String timeInput = "";
-unsigned long lastTimeInput = 0;
+unsigned long lastTimeInput = 0; // Thời gian nhập số cuối cùng
 
 // RUNNING (chế độ thủ công)
-unsigned long runStartTime = 0;
-int runSprinklerIndices[10];
-int runSprinklerCount = 0;
-int currentRunIndex = 0;
-bool paused = false;
-unsigned long pauseRemaining = 0;
-bool transitionActive = false;
-unsigned long transitionStartTime = 0;
+unsigned long runStartTime = 0;        // Thời gian bắt đầu chu trình tưới
+int runSprinklerIndices[10];           // Danh sách chỉ số béc tưới đang bật
+int runSprinklerCount = 0;             // Số lượng béc tưới được bật
+int currentRunIndex = 0;               // Béc tưới hiện hành trong chu trình
+bool paused = false;                   // Cờ tạm dừng chu trình
+unsigned long pauseRemaining = 0;      // Thời gian còn lại khi tạm dừng
+bool transitionActive = false;         // Cờ cho biết đang trong thời gian delay chuyển béc
+unsigned long transitionStartTime = 0; // Thời gian bắt đầu chuyển béc
 
-// ------------------ Các biến và tham số cho chức năng TỰ ĐỘNG ------------------
+// -------------------- Dữ liệu cho chức năng TỰ ĐỘNG --------------------
 
-// Các chế độ AUTO (ON/OFF)
-int autoMenuSelection = 0; // Dùng cho menu AUTO
+// Menu và chế độ TỰ ĐỘNG
+int autoMenuSelection = 0; // Lựa chọn trong AUTO_MENU
 enum AutoMode
 {
-  AUTO_ON,
-  AUTO_OFF
+  AUTO_ON, // Cho phép tự động
+  AUTO_OFF // Tắt chế độ tự động
 };
 AutoMode autoMode = AUTO_OFF;
-int autoCurrentSprinkler = 0;     // Dùng cho CurrentSprinkler – chỉ định béc bắt đầu của chu trình
-int autoCurrentSprinklerTemp = 0; // Thay đổi qua menu CurrentSprinkler
+int autoCurrentSprinkler = 0;     // Béc bắt đầu của chu trình tự động (có thể thay đổi qua menu)
+int autoCurrentSprinklerTemp = 0; // Biến tạm khi chỉnh CurrentSprinkler
 
-// Tham số thời gian tự động
-int autoStartMinute = 1320; // FROM: 22:00
-int autoEndMinute = 240;    // TO: 4:00
-int autoDurationHour = 3;   // DUR: 3 giờ
+// Tham số thời gian kích hoạt tự động (CHINH GIO)
+int autoStartMinute = 1320; // FROM: 22:00 (tính theo phút)
+int autoEndMinute = 240;    // TO: 4:00 (tính theo phút)
+int autoDurationHour = 3;   // DUR: 3 giờ cho mỗi béc
 int autoDurationMinute = 0;
 
 // Tham số thời gian nghỉ sau chu trình AUTO (REST)
 int autoRestTimeHour = 0, autoRestTimeMinute = 5;
 
-// Chỉnh sửa thời gian Auto (FROM, TO, DUR, REST)
+// Các biến chỉnh sửa thời gian AUTO (cho các trường: FROM, TO, DUR, REST)
 int autoTimeSelectField = 0; // 0: FROM, 1: TO, 2: DUR, 3: REST
 int autoTimeEditPhase = 0;   // 0: chỉnh giờ, 1: chỉnh phút
 int autoStartHourTemp = 0, autoStartMinTemp = 0;
@@ -190,39 +198,48 @@ int autoEndHourTemp = 0, autoEndMinTemp = 0;
 int autoDurHourTemp = autoDurationHour, autoDurMinTemp = autoDurationMinute;
 int autoRestHourTemp = autoRestTimeHour, autoRestMinTemp = autoRestTimeMinute;
 String autoTimeInput = "";
-unsigned long lastAutoTimeInput = 0;
-unsigned long lastAutoCycleEndEpoch = 0;
+unsigned long lastAutoTimeInput = 0;     // Thời gian nhập số cuối cùng cho AUTO
+unsigned long lastAutoCycleEndEpoch = 0; // Thời gian kết thúc chu trình AUTO (nếu cần lưu)
 
-// Biến đánh dấu chu trình AUTO đã hoàn thành và đang nghỉ (REST)
+// Biến đánh dấu chu trình AUTO đã kết thúc và đang trong giai đoạn nghỉ (REST)
 bool autoCycleResting = false;
 unsigned long autoCycleEndTime = 0;
 
-// Các biến riêng cho chu trình AUTO
-int autoSprinklerIndices[10]; // Danh sách các béc sẽ chạy trong chế độ AUTO (là chỉ số béc)
-int autoSprinklerCount = 0;   // Số lượng béc trong chu trình AUTO
-int autoCycleIndex = 0;       // Chỉ số béc hiện hành trong chu trình AUTO
+// Các biến riêng cho chu trình AUTO (để không bị trùng với chế độ thủ công)
+int autoSprinklerIndices[10]; // Danh sách chỉ số béc tưới cho chế độ AUTO
+int autoSprinklerCount = 0;   // Số lượng béc tưới trong chu trình AUTO
+int autoCycleIndex = 0;       // Chỉ số béc tưới hiện hành trong chu trình AUTO
 
-// ------------------ Hàm helper ------------------
+// ==================== HÀM HELPER ====================
+
+// Hàm định dạng thời gian (phút) thành chuỗi "H:MM"
 String formatTime(int minutes)
 {
-  int hour = minutes / 60, min = minutes % 60;
+  int hour = minutes / 60;
+  int min = minutes % 60;
   char timeStr[6];
   sprintf(timeStr, "%d:%02d", hour, min);
   return String(timeStr);
 }
 
+// Hàm định dạng thời gian còn lại (giây) thành chuỗi "HH:MM:SS"
 String formatRemainingTime(unsigned long seconds)
 {
-  unsigned int h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60;
+  unsigned int h = seconds / 3600;
+  unsigned int m = (seconds % 3600) / 60;
+  unsigned int s = seconds % 60;
   char buf[9];
   sprintf(buf, "%02u:%02u:%02u", h, m, s);
   return String(buf);
 }
 
-// ------------------ Hàm điều khiển bơm và béc tưới ------------------
+// ==================== HÀM ĐIỀU KHIỂN BƠM VÀ BÉC TƯỚI ====================
+
+// Hàm bật béc tưới và bơm tương ứng với béc được chỉ định
 void activatePumpForSprinkler(int sprinklerIndex)
 {
   digitalWrite(relayPins[sprinklerIndex], HIGH);
+  // Nếu béc nằm trong nửa đầu, bật bơm theo kiểu 1, ngược lại theo kiểu 2
   if (sprinklerIndex < 6)
   {
     digitalWrite(relayPins[10], HIGH);
@@ -235,6 +252,7 @@ void activatePumpForSprinkler(int sprinklerIndex)
   }
 }
 
+// Hàm tắt béc tưới và bơm tương ứng
 void turnOffCurrentSprinklerAndPump(int sprinklerIndex)
 {
   digitalWrite(relayPins[sprinklerIndex], LOW);
@@ -592,24 +610,32 @@ void updateMenuDisplay()
   display.display();
 }
 
-// ------------------ Hàm xử lý IR theo từng menu ------------------
+// ==================== XỬ LÝ TÍN HIỆU IR THEO TỪNG MENU ====================
+
+/*
+   Hàm xử lý tín hiệu IR cho menu chính (MAIN_MENU)
+   - UP/DOWN thay đổi lựa chọn
+   - OK: Nếu lựa chọn là CONFIG_MENU thì lưu backup config và chuyển sang menu cấu hình;
+         nếu là TIME_SELECT_MENU thì chuyển sang menu chỉnh thời gian tưới;
+         nếu là TU DONG thì chuyển sang menu tự động.
+*/
 void processMainMenuIR(const String &cmd)
 {
   if (cmd == "UP")
-    mainMenuSelection = (mainMenuSelection + 2) % 3;
+    mainMenuSelection = (mainMenuSelection + 2) % 3; // Vòng lặp menu 3 mục
   else if (cmd == "DOWN")
     mainMenuSelection = (mainMenuSelection + 1) % 3;
   else if (cmd == "OK")
   {
     if (mainMenuSelection == 0)
-    {
+    { // Chuyển sang CONFIG_MENU
       for (int i = 0; i < 10; i++)
         backupConfig[i] = allowedSprinklers[i];
       configMode = 0;
       currentMenu = CONFIG_MENU;
     }
     else if (mainMenuSelection == 1)
-    {
+    { // Chuyển sang TIME_SELECT_MENU (chỉnh giờ tưới thủ công)
       tempHour = currentHour;
       tempMinute = currentMinute;
       timeInput = "";
@@ -617,12 +643,20 @@ void processMainMenuIR(const String &cmd)
       currentMenu = TIME_SELECT_MENU;
     }
     else
-    {
+    { // Chuyển sang AUTO_MENU (chế độ tự động)
       currentMenu = AUTO_MENU;
     }
   }
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho menu cấu hình (CONFIG_MENU)
+   - UP/DOWN thay đổi mục hoặc tăng giảm giá trị delay
+   - OK: Nếu ở chế độ cấu hình béc, đảo trạng thái ON/OFF của béc được chọn
+   - LEFT/RIGHT chuyển đổi giữa chế độ cấu hình béc và cấu hình delay
+   - STAR: Huỷ bỏ thay đổi và quay lại MAIN_MENU
+   - HASH: Lưu cấu hình (delay) và quay lại MAIN_MENU
+*/
 void processConfigMenuIR(const String &cmd)
 {
   if (cmd == "UP")
@@ -645,9 +679,13 @@ void processConfigMenuIR(const String &cmd)
       allowedSprinklers[configSelected] = !allowedSprinklers[configSelected];
   }
   else if (cmd == "LEFT" || cmd == "RIGHT")
+  {
+    // Chuyển đổi giữa cấu hình béc và delay
     configMode = (configMode == 0) ? 1 : 0;
+  }
   else if (cmd == "STAR")
   {
+    // Huỷ bỏ thay đổi, khôi phục cấu hình ban đầu
     for (int i = 0; i < 10; i++)
       allowedSprinklers[i] = backupConfig[i];
     currentMenu = MAIN_MENU;
@@ -660,6 +698,15 @@ void processConfigMenuIR(const String &cmd)
   }
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho menu chỉnh thời gian tưới thủ công (TIME_SELECT_MENU)
+   - UP/DOWN tăng giảm giá trị giờ hoặc phút
+   - LEFT/RIGHT chuyển đổi giữa chỉnh giờ và chỉnh phút, reset input
+   - OK/HASH: Lưu cấu hình thời gian, khởi tạo danh sách béc tưới, chuyển sang chế độ RUNNING nếu có béc được bật;
+         nếu không thì hiển thị thông báo.
+   - STAR: Huỷ bỏ và quay lại MAIN_MENU
+   - Nếu nhận số (digit), cập nhật giá trị thời gian dựa theo chế độ hiện hành (giờ hoặc phút)
+*/
 void processTimeSelectMenuIR(const String &cmd)
 {
   if (cmd == "UP")
@@ -690,6 +737,7 @@ void processTimeSelectMenuIR(const String &cmd)
   {
     if (tempHour == 0 && tempMinute == 0)
     {
+      // Thông báo không hợp lệ nếu giờ và phút đều bằng 0
       display.clearDisplay();
       display.setTextSize(1);
       display.setTextColor(SSD1306_WHITE);
@@ -701,6 +749,7 @@ void processTimeSelectMenuIR(const String &cmd)
     }
     else
     {
+      // Lưu giá trị thời gian tưới và khởi tạo danh sách béc tưới
       currentHour = tempHour;
       currentMinute = tempMinute;
       irrigationTime = currentHour * 60 + currentMinute;
@@ -713,6 +762,7 @@ void processTimeSelectMenuIR(const String &cmd)
       }
       if (runSprinklerCount == 0)
       {
+        // Nếu không có béc nào được bật, hiển thị thông báo
         display.clearDisplay();
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
@@ -724,6 +774,7 @@ void processTimeSelectMenuIR(const String &cmd)
       }
       else
       {
+        // Khởi động chế độ RUNNING (thủ công)
         currentMenu = RUNNING;
         currentRunIndex = 0;
         runStartTime = millis();
@@ -736,6 +787,7 @@ void processTimeSelectMenuIR(const String &cmd)
     currentMenu = MAIN_MENU;
   else if (cmd.length() == 1 && isDigit(cmd.charAt(0)))
   {
+    // Xử lý nhập số: cộng dồn chuỗi nhập và chuyển đổi thành số
     unsigned long now = millis();
     if (now - lastTimeInput < 1000)
       timeInput += cmd;
@@ -754,6 +806,17 @@ void processTimeSelectMenuIR(const String &cmd)
   }
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho menu tự động (AUTO_MENU)
+   - UP/DOWN thay đổi lựa chọn trong menu AUTO
+   - OK: Tùy theo lựa chọn:
+         0: AUTO ON -> bật tự động
+         1: AUTO OFF -> tắt tự động
+         2: RESET -> reset lại chu trình tự động
+         3: Chuyển sang menu chỉnh CurrentSprinkler
+         4: Chuyển sang menu chỉnh thời gian tự động (CHINH GIO)
+   - STAR: Quay lại MAIN_MENU
+*/
 void processAutoMenuIR(const String &cmd)
 {
   if (cmd == "UP")
@@ -775,7 +838,7 @@ void processAutoMenuIR(const String &cmd)
       currentMenu = MAIN_MENU;
     }
     else if (autoMenuSelection == 2)
-    { // RESET
+    { // RESET chu trình tự động
       autoCurrentSprinkler = 0;
       lastAutoCycleEndEpoch = 0;
       autoCycleResting = false;
@@ -788,7 +851,7 @@ void processAutoMenuIR(const String &cmd)
       autoCurrentSprinklerTemp = autoCurrentSprinkler;
     }
     else if (autoMenuSelection == 4)
-    { // CHINH GIO (bao gồm REST)
+    { // CHINH GIO (chỉnh FROM, TO, DUR, REST)
       autoTimeSelectField = 0;
       autoTimeEditPhase = 0;
       autoStartHourTemp = autoStartMinute / 60;
@@ -806,6 +869,12 @@ void processAutoMenuIR(const String &cmd)
     currentMenu = MAIN_MENU;
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho menu chỉnh CurrentSprinkler của chế độ tự động
+   - UP/DOWN: Thay đổi giá trị tạm
+   - HASH: Lưu giá trị tạm (autoCurrentSprinklerTemp) thành autoCurrentSprinkler và lưu cấu hình
+   - STAR: Quay lại AUTO_MENU
+*/
 void processAutoCurrentSprinklerIR(const String &cmd)
 {
   if (cmd == "UP" && autoCurrentSprinklerTemp < 9)
@@ -822,13 +891,21 @@ void processAutoCurrentSprinklerIR(const String &cmd)
     currentMenu = AUTO_MENU;
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho menu chỉnh thời gian tự động (AUTO_TIME_MENU)
+   - UP/DOWN: Tăng giảm giá trị cho giờ (nếu đang ở giai đoạn chỉnh giờ) hoặc phút (nếu đang chỉnh phút)
+   - OK: Chuyển đổi giữa các giai đoạn chỉnh sửa (giờ/phút) hoặc chuyển sang trường tiếp theo
+   - LEFT/RIGHT: Chuyển giữa các trường (FROM, TO, DUR, REST)
+   - HASH: Lưu lại các giá trị đã chỉnh và quay lại AUTO_MENU
+   - STAR: Huỷ bỏ thay đổi và quay lại AUTO_MENU
+   - Nhập số (digit): Cập nhật giá trị dựa trên trường đang chỉnh. Với trường REST, giờ cho phép từ 0-99.
+*/
 void processAutoTimeMenuIR(const String &cmd)
 {
-  // Xử lý 4 trường: 0: FROM, 1: TO, 2: DUR, 3: REST
   if (cmd == "UP")
   {
     if (autoTimeEditPhase == 0)
-    {
+    { // Chỉnh giờ
       if (autoTimeSelectField == 0)
         autoStartHourTemp = (autoStartHourTemp + 1) % 24;
       else if (autoTimeSelectField == 1)
@@ -836,10 +913,10 @@ void processAutoTimeMenuIR(const String &cmd)
       else if (autoTimeSelectField == 2)
         autoDurHourTemp = (autoDurHourTemp + 1) % 24;
       else if (autoTimeSelectField == 3)
-        autoRestHourTemp = (autoRestHourTemp + 1) % 24;
+        autoRestHourTemp = (autoRestHourTemp + 1) % 100; // Cho phép 0-99 cho REST giờ
     }
     else
-    {
+    { // Chỉnh phút
       if (autoTimeSelectField == 0)
         autoStartMinTemp = (autoStartMinTemp + 1) % 60;
       else if (autoTimeSelectField == 1)
@@ -861,7 +938,7 @@ void processAutoTimeMenuIR(const String &cmd)
       else if (autoTimeSelectField == 2)
         autoDurHourTemp = (autoDurHourTemp + 23) % 24;
       else if (autoTimeSelectField == 3)
-        autoRestHourTemp = (autoRestHourTemp + 23) % 24;
+        autoRestHourTemp = (autoRestHourTemp + 99) % 100; // Cho phép 0-99 cho REST giờ
     }
     else
     {
@@ -877,6 +954,7 @@ void processAutoTimeMenuIR(const String &cmd)
   }
   else if (cmd == "OK")
   {
+    // Chuyển giữa giai đoạn chỉnh sửa (giờ -> phút) hoặc chuyển sang trường tiếp theo
     if (autoTimeEditPhase == 0)
       autoTimeEditPhase = 1;
     else
@@ -887,6 +965,7 @@ void processAutoTimeMenuIR(const String &cmd)
   }
   else if (cmd == "HASH")
   {
+    // Lưu lại các giá trị đã chỉnh và quay lại AUTO_MENU
     autoStartMinute = autoStartHourTemp * 60 + autoStartMinTemp;
     autoEndMinute = autoEndHourTemp * 60 + autoEndMinTemp;
     autoDurationHour = autoDurHourTemp;
@@ -913,9 +992,12 @@ void processAutoTimeMenuIR(const String &cmd)
     }
   }
   else if (cmd == "STAR")
+  {
     currentMenu = AUTO_MENU;
+  }
   else if (cmd.length() == 1 && isDigit(cmd.charAt(0)))
   {
+    // Xử lý nhập số: cộng dồn chuỗi nhập và chuyển đổi sang số
     unsigned long now = millis();
     if (now - lastAutoTimeInput < 1000)
       autoTimeInput += cmd;
@@ -924,18 +1006,18 @@ void processAutoTimeMenuIR(const String &cmd)
     lastAutoTimeInput = now;
     int value = autoTimeInput.toInt();
     if (autoTimeEditPhase == 0)
-    {
+    { // Chỉnh giờ
       if (autoTimeSelectField == 0 && value >= 0 && value <= 23)
         autoStartHourTemp = value;
       else if (autoTimeSelectField == 1 && value >= 0 && value <= 23)
         autoEndHourTemp = value;
       else if (autoTimeSelectField == 2 && value >= 0 && value <= 23)
         autoDurHourTemp = value;
-      else if (autoTimeSelectField == 3 && value >= 0 && value <= 99)
+      else if (autoTimeSelectField == 3 && value >= 0 && value <= 99) // REST giờ cho phép 0-99
         autoRestHourTemp = value;
     }
     else
-    {
+    { // Chỉnh phút
       if (autoTimeSelectField == 0 && value >= 0 && value <= 59)
         autoStartMinTemp = value;
       else if (autoTimeSelectField == 1 && value >= 0 && value <= 59)
@@ -948,6 +1030,11 @@ void processAutoTimeMenuIR(const String &cmd)
   }
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho chế độ RUNNING (tưới thủ công)
+   - OK: Nếu đang chạy, tạm dừng và tắt hết relay; nếu đang tạm dừng, khởi động lại chu trình tưới
+   - STAR: Dừng toàn bộ và quay lại MAIN_MENU
+*/
 void processRunningIR(const String &cmd)
 {
   if (cmd == "OK")
@@ -957,11 +1044,13 @@ void processRunningIR(const String &cmd)
       paused = true;
       unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
       pauseRemaining = cycleDuration - (millis() - runStartTime);
+      // Tắt hết relay khi tạm dừng
       for (int i = 0; i < 12; i++)
         digitalWrite(relayPins[i], LOW);
     }
     else
     {
+      // Khởi động lại chu trình tưới dựa trên thời gian tạm dừng
       runStartTime = millis() - ((unsigned long)irrigationTime * 60000UL - pauseRemaining);
       activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
       paused = false;
@@ -969,12 +1058,18 @@ void processRunningIR(const String &cmd)
   }
   else if (cmd == "STAR")
   {
+    // Dừng toàn bộ, tắt relay và quay lại MAIN_MENU
     for (int i = 0; i < 12; i++)
       digitalWrite(relayPins[i], LOW);
     currentMenu = MAIN_MENU;
   }
 }
 
+/*
+   Hàm xử lý tín hiệu IR cho chế độ RUNNING_AUTO (tưới tự động)
+   - OK: Tạm dừng/khởi động lại chu trình tự động
+   - STAR: Dừng toàn bộ và tắt chế độ tự động, lưu cấu hình
+*/
 void processRunningAutoIR(const String &cmd)
 {
   if (cmd == "OK")
@@ -1004,7 +1099,12 @@ void processRunningAutoIR(const String &cmd)
   }
 }
 
-// ------------------ Xử lý tín hiệu IR ------------------
+/*
+   Hàm tổng hợp xử lý tín hiệu IR:
+   - Kiểm tra tín hiệu từ IR receiver
+   - Dựa vào currentMenu, chuyển tín hiệu sang hàm xử lý tương ứng
+   - Resume IR receiver sau khi xử lý
+*/
 void processIRRemote()
 {
   if (!IrReceiver.decode())
@@ -1019,6 +1119,8 @@ void processIRRemote()
   String cmd = mapIRCodeToCommand(code);
   lastCode = code;
   lastReceiveTime = currentTime;
+
+  // Chuyển xử lý theo trạng thái menu hiện hành
   switch (currentMenu)
   {
   case MAIN_MENU:
@@ -1045,11 +1147,16 @@ void processIRRemote()
   case RUNNING_AUTO:
     processRunningAutoIR(cmd);
     break;
+  default:
+    break;
   }
   IrReceiver.resume();
 }
 
-// ------------------ Hàm khởi tạo danh sách béc cho chế độ thủ công ------------------
+/*
+   Hàm khởi tạo danh sách béc cho chế độ thủ công.
+   Nếu không có béc nào bật, mặc định bật béc 1.
+*/
 void initRunSprinklerIndices()
 {
   runSprinklerCount = 0;
@@ -1066,11 +1173,13 @@ void initRunSprinklerIndices()
   }
 }
 
-// ------------------ Hàm khởi tạo danh sách béc cho chế độ tự động ------------------
+/*
+   Hàm khởi tạo danh sách béc cho chế độ tự động.
+   - Nếu autoCurrentSprinkler = 0 (béc 1), chu trình gồm đủ 10 béc.
+   - Nếu khác 0, chu trình chạy từ béc đó đến béc cuối (10).
+*/
 void initAutoCycleIndices()
 {
-  // Nếu autoCurrentSprinkler = 0, tức là bắt đầu từ béc 1, chu trình chạy đủ 10 béc.
-  // Nếu autoCurrentSprinkler khác 0, chu trình chạy từ béc đó đến béc cuối (10).
   autoSprinklerCount = 10 - autoCurrentSprinkler;
   for (int i = 0; i < autoSprinklerCount; i++)
   {
@@ -1078,13 +1187,18 @@ void initAutoCycleIndices()
   }
 }
 
-// ------------------ Hàm cập nhật chu trình RUNNING (thủ công) ------------------
+/*
+   Hàm cập nhật chu trình tưới thủ công (RUNNING)
+   - Theo dõi thời gian tưới cho béc hiện hành.
+   - Nếu hết thời gian, chuyển sang béc tiếp theo nếu có, hoặc kết thúc chu trình và quay lại MAIN_MENU.
+*/
 void updateRunning()
 {
   if (currentMenu != RUNNING || paused)
     return;
   unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
   unsigned long elapsedCycle = millis() - runStartTime;
+
   if (!transitionActive)
   {
     if (elapsedCycle >= cycleDuration)
@@ -1119,23 +1233,13 @@ void updateRunning()
   }
 }
 
-// ------------------ Hàm isInAutoTime ------------------
-bool isInAutoTime()
-{
-  int currentHourRT = ntpClient.getHours();
-  int currentMinuteRT = ntpClient.getMinutes();
-  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
-  bool inAutoTime = false;
-
-  if (autoStartMinute < autoEndMinute)
-    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
-  else
-    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
-
-  return inAutoTime;
-}
-
-// ------------------ Hàm cập nhật chu trình RUNNING_AUTO (tự động) ------------------
+/*
+   Hàm cập nhật chu trình tưới tự động (RUNNING_AUTO)
+   - Dựa vào thời gian tưới cho mỗi béc (DUR) và delay chuyển béc.
+   - Nếu hết thời gian và trong khoảng AUTO (theo FROM-TO), chuyển sang béc tiếp theo.
+   - Nếu đã chạy hết danh sách, chuyển sang trạng thái nghỉ (REST) và quay lại MAIN_MENU.
+   - Mỗi lần chuyển béc mới, cập nhật autoCurrentSprinkler và lưu cấu hình.
+*/
 void updateRunningAuto()
 {
   if (currentMenu != RUNNING_AUTO || paused)
@@ -1188,7 +1292,7 @@ void updateRunningAuto()
       transitionActive = false;
       if (autoCycleIndex < autoSprinklerCount)
       {
-        // Cập nhật autoCurrentSprinkler mỗi khi bật béc mới
+        // Cập nhật autoCurrentSprinkler mỗi khi chuyển sang béc mới
         autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
         activatePumpForSprinkler(autoCurrentSprinkler);
         saveConfig();
@@ -1197,14 +1301,18 @@ void updateRunningAuto()
   }
 }
 
-// ------------------ Hàm kiểm tra Auto Mode ------------------
+/*
+   Hàm kiểm tra chế độ AUTO:
+   - Nếu chế độ AUTO bật (AUTO_ON) và thời gian hiện tại (theo NTP) nằm trong khoảng FROM-TO,
+     nếu chưa ở chế độ RUNNING_AUTO thì khởi động chu trình mới.
+   - Nếu đã nghỉ (REST) và đủ thời gian nghỉ, khởi động lại chu trình tự động.
+*/
 void checkAutoMode()
 {
   if (autoMode == AUTO_OFF)
     return;
 
   bool inAutoTime = isInAutoTime();
-
   unsigned long restTimeMs = (autoRestTimeHour * 60UL + autoRestTimeMinute) * 60000UL;
 
   if (inAutoTime)
@@ -1242,7 +1350,9 @@ void checkAutoMode()
   // Nếu không còn trong khoảng thời gian AUTO, hệ thống cho phép hoàn tất chu trình hiện hành.
 }
 
-// ------------------ Lưu & tải cấu hình ------------------
+/*
+   Hàm lưu & tải cấu hình từ flash sử dụng Preferences
+*/
 void saveConfig()
 {
   preferences.begin("config", false);
@@ -1274,6 +1384,7 @@ void loadConfig()
     String key = "sprayer" + String(i);
     allowedSprinklers[i] = preferences.getBool(key.c_str(), false);
   }
+  // Nếu tất cả các béc đều tắt, bật mặc định béc 1
   bool anyEnabled = false;
   for (int i = 0; i < 10; i++)
   {
@@ -1284,9 +1395,8 @@ void loadConfig()
     }
   }
   if (!anyEnabled)
-  {
     allowedSprinklers[0] = true;
-  }
+
   transitionDelaySeconds = preferences.getInt("delay", 10);
   transitionDelayTemp = transitionDelaySeconds;
   irrigationTime = preferences.getUInt("irrigationTime", 120);
@@ -1313,7 +1423,10 @@ void loadConfig()
   Serial.println("Config loaded.");
 }
 
-// ------------------ Kiểm tra bảo vệ bơm và đồng bộ relay với Blynk ------------------
+/*
+   Hàm kiểm tra bảo vệ bơm và đồng bộ trạng thái relay với Blynk
+   - Nếu không có béc nào đang bật mà bơm lại đang bật, kích hoạt cơ chế bảo vệ.
+*/
 void checkPumpProtection()
 {
   static bool lastPumpProtectionTriggered = false;
@@ -1336,9 +1449,14 @@ void checkPumpProtection()
     Serial.println("Pump protection triggered.");
   }
   else if (sprayerActive || !pumpOn)
+  {
     lastPumpProtectionTriggered = false;
+  }
 }
 
+/*
+   Hàm đồng bộ trạng thái relay với Blynk (cập nhật các kênh 1-12)
+*/
 void syncRelayStatusToBlynk()
 {
   static int lastStates[12] = {-1};
@@ -1358,16 +1476,39 @@ void syncRelayStatusToBlynk()
   }
 }
 
-// ------------------ Setup và Loop ------------------
+/*
+   Hàm lấy thời gian hiện tại (theo NTP) và kiểm tra xem có nằm trong khoảng AUTO (FROM-TO) hay không.
+*/
+bool isInAutoTime()
+{
+  int currentHourRT = ntpClient.getHours();
+  int currentMinuteRT = ntpClient.getMinutes();
+  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
+  bool inAutoTime = false;
+
+  if (autoStartMinute < autoEndMinute)
+    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
+  else
+    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
+
+  return inAutoTime;
+}
+
+// ==================== SETUP VÀ LOOP CHÍNH ====================
 BlynkTimer timer;
+
 void setup()
 {
   Serial.begin(115200);
+
+  // Khởi tạo các chân relay làm OUTPUT và tắt hết ban đầu
   for (int i = 0; i < 12; i++)
   {
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], LOW);
   }
+
+  // Khởi tạo giao tiếp I2C cho OLED (SDA, SCL: 32, 33)
   Wire.begin(32, 33);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
@@ -1377,13 +1518,23 @@ void setup()
   }
   display.clearDisplay();
   display.display();
+
+  // Tải cấu hình từ flash
   loadConfig();
+
+  // Khởi tạo danh sách béc cho chế độ thủ công
   initRunSprinklerIndices();
+
+  // Khởi tạo kết nối Blynk
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   Serial.println("ESP32 connected to Blynk!");
+
+  // Khởi tạo IR và NTP client
   setupIR();
   ntpClient.begin();
   ntpClient.update();
+
+  // Thiết lập bộ đếm thời gian (timer)
   timer.setInterval(500L, updateMenuDisplay);
   timer.setInterval(30000L, []()
                     { ntpClient.update(); });
@@ -1394,10 +1545,13 @@ void loop()
   Blynk.run();
   timer.run();
   processIRRemote();
+
+  // Cập nhật chế độ tưới dựa vào menu hiện hành
   if (currentMenu == RUNNING)
     updateRunning(); // Chế độ tưới thủ công
   else if (currentMenu == RUNNING_AUTO)
     updateRunningAuto(); // Chế độ tưới tự động
+
   checkPumpProtection();
   syncRelayStatusToBlynk();
   checkAutoMode();
