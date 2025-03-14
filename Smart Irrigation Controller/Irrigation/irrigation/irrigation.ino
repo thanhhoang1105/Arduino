@@ -161,19 +161,9 @@ bool transitionActive = false;
 unsigned long transitionStartTime = 0;
 
 // ------------------ Các biến và tham số cho chức năng TỰ ĐỘNG ------------------
-// AUTO_MENU
-enum AutoOption
-{
-  AUTO_ON_OPT,
-  AUTO_OFF_OPT,
-  AUTO_RESET_OPT,
-  AUTO_TIME_OPT
-};
-int autoMenuSelection = 0;
-const int maxVisibleAuto = 3;
-int autoScrollOffset = 0;
 
 // Các chế độ AUTO (ON/OFF)
+int autoMenuSelection = 0; // Dùng cho menu AUTO
 enum AutoMode
 {
   AUTO_ON,
@@ -941,7 +931,7 @@ void processAutoTimeMenuIR(const String &cmd)
         autoEndHourTemp = value;
       else if (autoTimeSelectField == 2 && value >= 0 && value <= 23)
         autoDurHourTemp = value;
-      else if (autoTimeSelectField == 3 && value >= 0 && value <= 23)
+      else if (autoTimeSelectField == 3 && value >= 0 && value <= 99)
         autoRestHourTemp = value;
     }
     else
@@ -1198,7 +1188,9 @@ void updateRunningAuto()
       transitionActive = false;
       if (autoCycleIndex < autoSprinklerCount)
       {
-        activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
+        // Cập nhật autoCurrentSprinkler mỗi khi bật béc mới
+        autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
+        activatePumpForSprinkler(autoCurrentSprinkler);
         saveConfig();
       }
     }
@@ -1228,10 +1220,10 @@ void checkAutoMode()
           autoCycleResting = false;
           runStartTime = millis();
           currentMenu = RUNNING_AUTO;
-          activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
+          // Cập nhật autoCurrentSprinkler khi bắt đầu chu trình mới
+          autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
+          activatePumpForSprinkler(autoCurrentSprinkler);
           saveConfig();
-          Serial.print("Starting AUTO cycle after rest, sprinkler: ");
-          Serial.println(autoSprinklerIndices[autoCycleIndex]);
         }
       }
       else
@@ -1240,10 +1232,10 @@ void checkAutoMode()
         autoCycleIndex = 0;
         runStartTime = millis();
         currentMenu = RUNNING_AUTO;
-        activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
+        // Cập nhật autoCurrentSprinkler khi bắt đầu chu trình mới
+        autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
+        activatePumpForSprinkler(autoCurrentSprinkler);
         saveConfig();
-        Serial.print("Starting AUTO cycle, sprinkler: ");
-        Serial.println(autoSprinklerIndices[autoCycleIndex]);
       }
     }
   }
