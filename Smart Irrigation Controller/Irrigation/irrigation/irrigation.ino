@@ -47,6 +47,10 @@ const int RECV_PIN = 15;                // Chân kết nối IR receiver
 const unsigned long debounceTime = 500; // Thời gian debounce cho nút bấm IR
 unsigned long lastCode = 0, lastReceiveTime = 0;
 
+// Biến non-blocking delay – khi cần hiển thị thông báo lỗi
+unsigned long nonBlockingDelayUntil = 0;
+bool nonBlockingDelayActive = false;
+
 // Hàm khởi tạo IR receiver
 void setupIR()
 {
@@ -260,14 +264,20 @@ void turnOffCurrentSprinklerAndPump(int sprinklerIndex)
   digitalWrite(relayPins[11], LOW);
 }
 
-// ------------------ Hàm hiển thị MENU ------------------
+// ==================== XỬ LÝ HIỂN THỊ MENU ====================
+
+/*
+   Hàm updateMenuDisplay() cập nhật giao diện OLED dựa theo currentMenu.
+   (Phần hiển thị MAIN_MENU được minh họa chi tiết; các menu khác có cấu trúc tương tự.)
+*/
 void updateMenuDisplay()
 {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+
   int y = 0;
-  // Hiển thị trạng thái Blynk (ON/OFF)
+  // Hiển thị trạng thái kết nối Blynk ở góc trên bên phải
   display.setCursor(110, y);
   display.println(Blynk.connected() ? "ON" : "OFF");
 
@@ -744,8 +754,9 @@ void processTimeSelectMenuIR(const String &cmd)
       display.setCursor(0, 0);
       display.println("0 HOUR 0 MIN");
       display.display();
-      delay(2000);
-      currentMenu = MAIN_MENU;
+      nonBlockingDelayUntil = millis() + 2000;
+      nonBlockingDelayActive = true;
+      return;
     }
     else
     {
@@ -769,8 +780,9 @@ void processTimeSelectMenuIR(const String &cmd)
         display.setCursor(0, 0);
         display.println("CHUA BAT BEC NAO");
         display.display();
-        delay(2000);
-        currentMenu = MAIN_MENU;
+        nonBlockingDelayUntil = millis() + 2000;
+        nonBlockingDelayActive = true;
+        return;
       }
       else
       {
@@ -1292,13 +1304,32 @@ void updateRunningAuto()
       transitionActive = false;
       if (autoCycleIndex < autoSprinklerCount)
       {
-        // Cập nhật autoCurrentSprinkler mỗi khi chuyển sang béc mới
         autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
         activatePumpForSprinkler(autoCurrentSprinkler);
         saveConfig();
       }
     }
   }
+}
+
+/*
+   isInAutoTime(): Kiểm tra xem thời gian hiện tại (theo NTP) có nằm trong khoảng kích hoạt AUTO không.
+   - Nếu khoảng thời gian không vượt qua 00:00: currentTimeMinutes phải nằm giữa autoStartMinute và autoEndMinute.
+   - Nếu vượt qua 00:00: currentTimeMinutes >= autoStartMinute hoặc < autoEndMinute.
+*/
+bool isInAutoTime()
+{
+  int currentHourRT = ntpClient.getHours();
+  int currentMinuteRT = ntpClient.getMinutes();
+  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
+  bool inAutoTime = false;
+
+  if (autoStartMinute < autoEndMinute)
+    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
+  else
+    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
+
+  return inAutoTime;
 }
 
 /*
@@ -1476,24 +1507,6 @@ void syncRelayStatusToBlynk()
   }
 }
 
-/*
-   Hàm lấy thời gian hiện tại (theo NTP) và kiểm tra xem có nằm trong khoảng AUTO (FROM-TO) hay không.
-*/
-bool isInAutoTime()
-{
-  int currentHourRT = ntpClient.getHours();
-  int currentMinuteRT = ntpClient.getMinutes();
-  int currentTimeMinutes = currentHourRT * 60 + currentMinuteRT;
-  bool inAutoTime = false;
-
-  if (autoStartMinute < autoEndMinute)
-    inAutoTime = (currentTimeMinutes >= autoStartMinute && currentTimeMinutes < autoEndMinute);
-  else
-    inAutoTime = (currentTimeMinutes >= autoStartMinute || currentTimeMinutes < autoEndMinute);
-
-  return inAutoTime;
-}
-
 // ==================== SETUP VÀ LOOP CHÍNH ====================
 BlynkTimer timer;
 
@@ -1542,15 +1555,22 @@ void setup()
 
 void loop()
 {
+  // Kiểm tra non-blocking delay để chuyển menu khi hết thời gian
+  if (nonBlockingDelayActive && millis() >= nonBlockingDelayUntil)
+  {
+    currentMenu = MAIN_MENU;
+    nonBlockingDelayActive = false;
+  }
+
   Blynk.run();
   timer.run();
   processIRRemote();
 
-  // Cập nhật chế độ tưới dựa vào menu hiện hành
+  // Cập nhật chu trình tưới dựa trên menu hiện hành
   if (currentMenu == RUNNING)
-    updateRunning(); // Chế độ tưới thủ công
+    updateRunning(); // Tưới thủ công
   else if (currentMenu == RUNNING_AUTO)
-    updateRunningAuto(); // Chế độ tưới tự động
+    updateRunningAuto(); // Tưới tự động
 
   checkPumpProtection();
   syncRelayStatusToBlynk();
