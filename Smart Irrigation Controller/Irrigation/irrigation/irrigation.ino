@@ -47,6 +47,7 @@ const int RECV_PIN = 15;                // Chân kết nối IR receiver
 const unsigned long debounceTime = 500; // Thời gian debounce cho nút bấm IR
 unsigned long lastCode = 0, lastReceiveTime = 0;
 
+// -------------------- Non-blocking Delay --------------------
 // Biến non-blocking delay – khi cần hiển thị thông báo lỗi
 unsigned long nonBlockingDelayUntil = 0;
 bool nonBlockingDelayActive = false;
@@ -1276,6 +1277,7 @@ void updateRunningAuto()
         }
         else
         {
+          // Nếu đã chạy hết danh sách, kết thúc chu trình và reset autoCurrentSprinkler về 0
           int currentSprinkler = autoSprinklerIndices[autoCycleIndex];
           turnOffCurrentSprinklerAndPump(currentSprinkler);
           autoCycleResting = true;
@@ -1287,7 +1289,10 @@ void updateRunningAuto()
       }
       else
       {
+        // Nếu không còn trong khoảng AUTO, tắt béc hiện hành và kết thúc chu trình
         turnOffCurrentSprinklerAndPump(autoSprinklerIndices[autoCycleIndex]);
+        // Cập nhật autoCurrentSprinkler = (béc hiện hành + 1) mod 10
+        autoCurrentSprinkler = (autoSprinklerIndices[autoCycleIndex] + 1) % 10;
         currentMenu = MAIN_MENU;
         saveConfig();
       }
