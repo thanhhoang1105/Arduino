@@ -47,6 +47,15 @@ const int RECV_PIN = 15;                // Chân kết nối IR receiver
 const unsigned long debounceTime = 500; // Thời gian debounce cho nút bấm IR
 unsigned long lastCode = 0, lastReceiveTime = 0;
 
+// -------------------- Module ACS712 --------------------
+// Sử dụng ACS712 5A với điện áp tham chiếu 5.0V (ESP32)
+// Chân ADC 34, ADC 12-bit (4095 bước), độ nhạy 185 mV/A.
+ACS712 sensor(34, 5.0, 4095, 185);
+const float POWER_CURRENT_THRESHOLD = 70;
+
+// -------------------- Biến kiểm tra trạng thái nguồn --------------------
+bool powerPaused = false; // Đánh dấu chu trình bị tạm dừng do mất điện
+
 // -------------------- Non-blocking Delay --------------------
 // Biến non-blocking delay – khi cần hiển thị thông báo lỗi
 unsigned long nonBlockingDelayUntil = 0;
@@ -1387,6 +1396,104 @@ void checkAutoMode()
 }
 
 /*
+   checkPower(): Sử dụng ACS712 để đo dòng điện.
+   - Lấy mẫu 10 lần và tính trung bình.
+   - Nếu dòng điện dưới ngưỡng POWER_CURRENT_THRESHOLD, coi như mất điện và tạm dừng chu trình.
+   - Nếu nguồn điện phục hồi và chu trình đang bị tạm dừng do mất điện, tự động resume.
+*/
+// Biến toàn cục dùng cho non‑blocking sampling của ACS712
+unsigned long lastPowerSampleTime = 0;       // Thời gian lấy mẫu cuối cùng
+const unsigned long powerSampleInterval = 5; // Khoảng cách giữa các mẫu (ms)
+int powerSampleCount = 0;                    // Số mẫu đã thu thập
+float powerSampleSum = 0.0;                  // Tổng các mẫu dòng điện (mA)
+
+void checkPower()
+{
+  // Nếu đủ thời gian giữa các mẫu, thu thập một mẫu mới.
+  if (millis() - lastPowerSampleTime >= powerSampleInterval)
+  {
+    lastPowerSampleTime = millis();
+    // Thu thập mẫu dòng điện từ ACS712 (mA)
+    powerSampleSum += sensor.mA_AC();
+    powerSampleCount++;
+  }
+
+  // Khi thu thập đủ 100 mẫu, tính trung bình và xử lý
+  if (powerSampleCount >= 100)
+  {
+    float current_mA = powerSampleSum / 100.0;
+
+    if (fabs(current_mA - 70.0) < 5.0 || current_mA < 70.0)
+    {
+      current_mA = 0;
+    }
+    else
+    {
+      current_mA -= 70.0;
+    }
+
+    // Đọc giá trị ADC để tính điện áp (giả sử điện áp tham chiếu là 3.3V)
+    int rawValue = analogRead(34);
+    float voltage = rawValue * 3.3 / 4095.0;
+
+    Serial.print("Voltage: ");
+    Serial.print(voltage, 3);
+    Serial.print(" V, Current: ");
+    Serial.print(current_mA, 2);
+    Serial.println(" mA");
+
+    // Reset bộ đếm mẫu
+    powerSampleCount = 0;
+    powerSampleSum = 0.0;
+
+    unsigned long cycleDuration = 0;
+    if (currentMenu == RUNNING)
+    {
+      cycleDuration = irrigationTime * 60000UL;
+    }
+    else if (currentMenu == RUNNING_AUTO)
+    {
+      cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
+    }
+
+    // Xử lý pause/resume dựa trên dòng điện đo được
+    if (current_mA < 7)
+    {
+      if (!paused)
+      { // Nếu chưa bị tạm dừng
+        pauseRemaining = cycleDuration - (millis() - runStartTime);
+        paused = true;
+        powerPaused = true;
+        for (int i = 0; i < 12; i++)
+        {
+          digitalWrite(relayPins[i], LOW);
+        }
+        Serial.println("Power lost: Pausing irrigation.");
+      }
+    }
+    else
+    {
+      if (powerPaused && paused)
+      {
+        if (currentMenu == RUNNING)
+        {
+          runStartTime = millis() - (cycleDuration - pauseRemaining);
+          activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
+        }
+        else if (currentMenu == RUNNING_AUTO)
+        {
+          runStartTime = millis() - (cycleDuration - pauseRemaining);
+          activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
+        }
+        paused = false;
+        powerPaused = false;
+        Serial.println("Power restored: Resuming irrigation.");
+      }
+    }
+  }
+}
+
+/*
    Hàm lưu & tải cấu hình từ flash sử dụng Preferences
 */
 void saveConfig()
@@ -1552,6 +1659,13 @@ void setup()
   ntpClient.begin();
   ntpClient.update();
 
+  // Hiệu chuẩn ACS712 và in thông tin
+  sensor.autoMidPoint();
+  Serial.print("ACS MidPoint: ");
+  Serial.println(sensor.getMidPoint());
+  Serial.print("ACS Noise mV: ");
+  Serial.println(sensor.getNoisemV());
+
   // Thiết lập bộ đếm thời gian (timer)
   timer.setInterval(500L, updateMenuDisplay);
   timer.setInterval(30000L, []()
@@ -1566,6 +1680,8 @@ void loop()
     currentMenu = MAIN_MENU;
     nonBlockingDelayActive = false;
   }
+
+  checkPower();
 
   Blynk.run();
   timer.run();
