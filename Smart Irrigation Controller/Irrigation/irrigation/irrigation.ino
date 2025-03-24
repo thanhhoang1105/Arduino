@@ -51,10 +51,15 @@ unsigned long lastCode = 0, lastReceiveTime = 0;
 // Sử dụng ACS712 5A với điện áp tham chiếu 5.0V (ESP32)
 // Chân ADC 34, ADC 12-bit (4095 bước), độ nhạy 185 mV/A.
 ACS712 sensor(34, 5.0, 4095, 185);
-const float POWER_CURRENT_THRESHOLD = 70;
+const float POWER_CURRENT_THRESHOLD = 80.0; // Ngưỡng dòng điện 70 mA
 
 // -------------------- Biến kiểm tra trạng thái nguồn --------------------
 bool powerPaused = false; // Đánh dấu chu trình bị tạm dừng do mất điện
+
+// -------------------- Cấu hình kiểm tra nguồn điện --------------------
+// Cho phép bật/tắt kiểm tra nguồn điện. Mặc định: true
+bool powerCheckEnabled = true;
+bool powerCheckEnabledTemp = true;
 
 // -------------------- Non-blocking Delay --------------------
 // Biến non-blocking delay – khi cần hiển thị thông báo lỗi
@@ -173,16 +178,20 @@ String timeInput = "";
 unsigned long lastTimeInput = 0; // Thời gian nhập số cuối cùng
 
 // RUNNING (chế độ thủ công)
-unsigned long runStartTime = 0;        // Thời gian bắt đầu chu trình tưới
-int runSprinklerIndices[10];           // Danh sách chỉ số béc tưới đang bật
-int runSprinklerCount = 0;             // Số lượng béc tưới được bật
-int currentRunIndex = 0;               // Béc tưới hiện hành trong chu trình
-bool paused = false;                   // Cờ tạm dừng chu trình
-unsigned long pauseRemaining = 0;      // Thời gian còn lại khi tạm dừng
+unsigned long runStartTimeManual = 0;   // Thời gian bắt đầu chu trình
+unsigned long pauseRemainingManual = 0; // Thời gian còn lại khi tạm dừng
+int runSprinklerIndices[10];            // Danh sách chỉ số béc tưới được bật
+int runSprinklerCount = 0;              // Số lượng béc tưới được bật
+int currentRunIndex = 0;                // Béc tưới hiện hành trong chu trình
+
+// Các biến chuyển béc (transition) và tạm dừng
 bool transitionActive = false;         // Cờ cho biết đang trong thời gian delay chuyển béc
 unsigned long transitionStartTime = 0; // Thời gian bắt đầu chuyển béc
+bool paused = false;                   // Cờ tạm dừng chu trình
 
-// -------------------- Dữ liệu cho chức năng TỰ ĐỘNG --------------------
+float lastCurrent_mA = 0;
+
+// -------------------- Dữ liệu cho chế độ tự động --------------------
 
 // Menu và chế độ TỰ ĐỘNG
 int autoMenuSelection = 0; // Lựa chọn trong AUTO_MENU
@@ -220,17 +229,18 @@ bool autoCycleResting = false;
 unsigned long autoCycleEndTime = 0;
 
 // Các biến riêng cho chu trình AUTO (để không bị trùng với chế độ thủ công)
-int autoSprinklerIndices[10]; // Danh sách chỉ số béc tưới cho chế độ AUTO
-int autoSprinklerCount = 0;   // Số lượng béc tưới trong chu trình AUTO
-int autoCycleIndex = 0;       // Chỉ số béc tưới hiện hành trong chu trình AUTO
+int autoSprinklerIndices[10];         // Danh sách chỉ số béc tưới cho chế độ AUTO
+int autoSprinklerCount = 0;           // Số lượng béc tưới trong chu trình AUTO
+int autoCycleIndex = 0;               // Chỉ số béc tưới hiện hành trong chu trình AUTO
+unsigned long runStartTimeAuto = 0;   // Thời gian bắt đầu chu trình AUTO
+unsigned long pauseRemainingAuto = 0; // Thời gian còn lại khi tạm dừng chu trình AUTO
 
 // ==================== HÀM HELPER ====================
 
 // Hàm định dạng thời gian (phút) thành chuỗi "H:MM"
 String formatTime(int minutes)
 {
-  int hour = minutes / 60;
-  int min = minutes % 60;
+  int hour = minutes / 60, min = minutes % 60;
   char timeStr[6];
   sprintf(timeStr, "%d:%02d", hour, min);
   return String(timeStr);
@@ -239,9 +249,7 @@ String formatTime(int minutes)
 // Hàm định dạng thời gian còn lại (giây) thành chuỗi "HH:MM:SS"
 String formatRemainingTime(unsigned long seconds)
 {
-  unsigned int h = seconds / 3600;
-  unsigned int m = (seconds % 3600) / 60;
-  unsigned int s = seconds % 60;
+  unsigned int h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60;
   char buf[9];
   sprintf(buf, "%02u:%02u:%02u", h, m, s);
   return String(buf);
@@ -249,7 +257,9 @@ String formatRemainingTime(unsigned long seconds)
 
 // ==================== HÀM ĐIỀU KHIỂN BƠM VÀ BÉC TƯỚI ====================
 
-// Hàm bật béc tưới và bơm tương ứng với béc được chỉ định
+/*
+   Hàm bật béc tưới và bơm tương ứng với béc được chỉ định
+*/
 void activatePumpForSprinkler(int sprinklerIndex)
 {
   digitalWrite(relayPins[sprinklerIndex], HIGH);
@@ -266,7 +276,9 @@ void activatePumpForSprinkler(int sprinklerIndex)
   }
 }
 
-// Hàm tắt béc tưới và bơm tương ứng
+/*
+   Hàm tắt béc tưới và bơm tương ứng
+*/
 void turnOffCurrentSprinklerAndPump(int sprinklerIndex)
 {
   digitalWrite(relayPins[sprinklerIndex], LOW);
@@ -288,8 +300,10 @@ void updateMenuDisplay()
 
   int y = 0;
   // Hiển thị trạng thái kết nối Blynk ở góc trên bên phải
-  display.setCursor(110, y);
-  display.println(Blynk.connected() ? "ON" : "OFF");
+  display.setCursor(70, y);
+  // display.println(Blynk.connected() ? "ON" : "OFF");
+  display.print(lastCurrent_mA, 2);
+  display.print(" mA");
 
   switch (currentMenu)
   {
@@ -326,7 +340,7 @@ void updateMenuDisplay()
     if (configMode == 0)
     {
       display.setCursor(0, y);
-      display.println("CAU HINH - BEC:");
+      display.println("BEC:");
       y += 16;
       if (configSelected < configScrollOffset)
         configScrollOffset = configSelected;
@@ -345,14 +359,25 @@ void updateMenuDisplay()
       display.setCursor(0, SCREEN_HEIGHT - 16);
       display.println("*: Cancel  #: Save");
     }
-    else
+    else if (configMode == 1)
     {
       display.setCursor(0, y);
-      display.println("CAU HINH - DELAY:");
+      display.println("DELAY:");
       y += 16;
       display.setCursor(0, y);
       display.print("Delay (s): ");
       display.println(transitionDelayTemp);
+      display.setCursor(0, SCREEN_HEIGHT - 16);
+      display.println("*: Cancel  #: Save");
+    }
+    else if (configMode == 2)
+    {
+      display.setCursor(0, y);
+      display.println("POWER:");
+      y += 16;
+      display.setCursor(0, y);
+      display.print("Check: ");
+      display.println(powerCheckEnabledTemp ? "ON" : "OFF");
       display.setCursor(0, SCREEN_HEIGHT - 16);
       display.println("*: Cancel  #: Save");
     }
@@ -521,7 +546,7 @@ void updateMenuDisplay()
       display.print(nextSprinkler + 1);
       display.println(" MO");
       yLine += 16;
-      unsigned long elapsed = (millis() - runStartTime) / 1000;
+      unsigned long elapsed = (millis() - runStartTimeManual) / 1000;
       unsigned long totalSec = irrigationTime * 60;
       unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
       display.setCursor(0, yLine);
@@ -541,7 +566,7 @@ void updateMenuDisplay()
       display.print("BEC ");
       display.print(runSprinklerIndices[currentRunIndex] + 1);
       display.println(" DUNG");
-      unsigned long remSec = (pauseRemaining / 1000) + 1;
+      unsigned long remSec = (pauseRemainingManual / 1000) + 1;
       display.setCursor(0, 32);
       display.print("CON LAI: ");
       display.println(formatRemainingTime(remSec));
@@ -554,7 +579,7 @@ void updateMenuDisplay()
         display.print("BEC ");
         display.print(runSprinklerIndices[currentRunIndex] + 1);
         display.println(" CHAY");
-        unsigned long elapsed = (millis() - runStartTime) / 1000;
+        unsigned long elapsed = (millis() - runStartTimeManual) / 1000;
         unsigned long totalSec = irrigationTime * 60;
         unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
         display.setCursor(0, 32);
@@ -581,7 +606,7 @@ void updateMenuDisplay()
       display.print("BEC ");
       display.print(autoSprinklerIndices[autoCycleIndex] + 1);
       display.println(" DUNG");
-      unsigned long remSec = (pauseRemaining / 1000) + 1;
+      unsigned long remSec = (pauseRemainingAuto / 1000) + 1;
       display.setCursor(0, 32);
       display.print("CON LAI: ");
       display.println(formatRemainingTime(remSec));
@@ -597,7 +622,7 @@ void updateMenuDisplay()
         display.print("BEC ");
         display.print(nextSprinkler + 1);
         display.println(" MO");
-        unsigned long elapsed = (millis() - runStartTime) / 1000;
+        unsigned long elapsed = (millis() - runStartTimeAuto) / 1000;
         unsigned long totalSec = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60UL;
         unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
         display.setCursor(0, 32);
@@ -617,7 +642,7 @@ void updateMenuDisplay()
       display.print("BEC ");
       display.print(autoSprinklerIndices[autoCycleIndex] + 1);
       display.println(" CHAY");
-      unsigned long elapsed = (millis() - runStartTime) / 1000;
+      unsigned long elapsed = (millis() - runStartTimeAuto) / 1000;
       unsigned long totalSec = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60UL;
       unsigned long remain = (totalSec > elapsed) ? totalSec - elapsed : 0;
       display.setCursor(0, 32);
@@ -642,7 +667,7 @@ void updateMenuDisplay()
 void processMainMenuIR(const String &cmd)
 {
   if (cmd == "UP")
-    mainMenuSelection = (mainMenuSelection + 2) % 3; // Vòng lặp menu 3 mục
+    mainMenuSelection = (mainMenuSelection + 2) % 3;
   else if (cmd == "DOWN")
     mainMenuSelection = (mainMenuSelection + 1) % 3;
   else if (cmd == "OK")
@@ -697,22 +722,34 @@ void processConfigMenuIR(const String &cmd)
   {
     if (configMode == 0)
       allowedSprinklers[configSelected] = !allowedSprinklers[configSelected];
+    else if (configMode == 2)
+      powerCheckEnabledTemp = !powerCheckEnabledTemp;
   }
-  else if (cmd == "LEFT" || cmd == "RIGHT")
+  else if (cmd == "LEFT")
   {
-    // Chuyển đổi giữa cấu hình béc và delay
-    configMode = (configMode == 0) ? 1 : 0;
+    // Cycle qua các chế độ cấu hình: 0 = BEC, 1 = DELAY, 2 = POWER CHECK
+    // Dùng (configMode + 2) % 3 để tránh giá trị âm khi configMode = 0
+    configMode = (configMode + 2) % 3;
+  }
+  else if (cmd == "RIGHT")
+  {
+    // Cycle qua các chế độ cấu hình: 0 = BEC, 1 = DELAY, 2 = POWER CHECK
+    configMode = (configMode + 1) % 3;
   }
   else if (cmd == "STAR")
   {
     // Huỷ bỏ thay đổi, khôi phục cấu hình ban đầu
     for (int i = 0; i < 10; i++)
       allowedSprinklers[i] = backupConfig[i];
+
+    transitionDelayTemp = transitionDelaySeconds;
+    powerCheckEnabledTemp = powerCheckEnabled;
     currentMenu = MAIN_MENU;
   }
   else if (cmd == "HASH")
   {
     transitionDelaySeconds = transitionDelayTemp;
+    powerCheckEnabled = powerCheckEnabledTemp;
     saveConfig();
     currentMenu = MAIN_MENU;
   }
@@ -799,7 +836,7 @@ void processTimeSelectMenuIR(const String &cmd)
         // Khởi động chế độ RUNNING (thủ công)
         currentMenu = RUNNING;
         currentRunIndex = 0;
-        runStartTime = millis();
+        runStartTimeManual = millis();
         paused = false;
         activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
       }
@@ -1014,9 +1051,7 @@ void processAutoTimeMenuIR(const String &cmd)
     }
   }
   else if (cmd == "STAR")
-  {
     currentMenu = AUTO_MENU;
-  }
   else if (cmd.length() == 1 && isDigit(cmd.charAt(0)))
   {
     // Xử lý nhập số: cộng dồn chuỗi nhập và chuyển đổi sang số
@@ -1065,7 +1100,7 @@ void processRunningIR(const String &cmd)
     {
       paused = true;
       unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
-      pauseRemaining = cycleDuration - (millis() - runStartTime);
+      pauseRemainingManual = cycleDuration - (millis() - runStartTimeManual);
       // Tắt hết relay khi tạm dừng
       for (int i = 0; i < 12; i++)
         digitalWrite(relayPins[i], LOW);
@@ -1073,7 +1108,7 @@ void processRunningIR(const String &cmd)
     else
     {
       // Khởi động lại chu trình tưới dựa trên thời gian tạm dừng
-      runStartTime = millis() - ((unsigned long)irrigationTime * 60000UL - pauseRemaining);
+      runStartTimeManual = millis() - ((unsigned long)irrigationTime * 60000UL - pauseRemainingManual);
       activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
       paused = false;
     }
@@ -1084,6 +1119,8 @@ void processRunningIR(const String &cmd)
     for (int i = 0; i < 12; i++)
       digitalWrite(relayPins[i], LOW);
     currentMenu = MAIN_MENU;
+    paused = false;
+    saveConfig();
   }
 }
 
@@ -1100,13 +1137,13 @@ void processRunningAutoIR(const String &cmd)
     {
       paused = true;
       unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
-      pauseRemaining = cycleDuration - (millis() - runStartTime);
+      pauseRemainingAuto = cycleDuration - (millis() - runStartTimeAuto);
       for (int i = 0; i < 12; i++)
         digitalWrite(relayPins[i], LOW);
     }
     else
     {
-      runStartTime = millis() - (((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL - pauseRemaining);
+      runStartTimeAuto = millis() - (((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL - pauseRemainingAuto);
       activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
       paused = false;
     }
@@ -1117,9 +1154,12 @@ void processRunningAutoIR(const String &cmd)
       digitalWrite(relayPins[i], LOW);
     autoMode = AUTO_OFF;
     currentMenu = MAIN_MENU;
+    paused = false;
     saveConfig();
   }
 }
+
+// ==================== SETUP VÀ LOOP ====================
 
 /*
    Hàm tổng hợp xử lý tín hiệu IR:
@@ -1219,7 +1259,7 @@ void updateRunning()
   if (currentMenu != RUNNING || paused)
     return;
   unsigned long cycleDuration = (unsigned long)irrigationTime * 60000UL;
-  unsigned long elapsedCycle = millis() - runStartTime;
+  unsigned long elapsedCycle = millis() - runStartTimeManual;
 
   if (!transitionActive)
   {
@@ -1249,7 +1289,7 @@ void updateRunning()
       int currentSprinkler = runSprinklerIndices[currentRunIndex];
       digitalWrite(relayPins[currentSprinkler], LOW);
       currentRunIndex++;
-      runStartTime = millis();
+      runStartTimeManual = millis();
       transitionActive = false;
     }
   }
@@ -1267,7 +1307,7 @@ void updateRunningAuto()
   if (currentMenu != RUNNING_AUTO || paused)
     return;
   unsigned long cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
-  unsigned long elapsedCycle = millis() - runStartTime;
+  unsigned long elapsedCycle = millis() - runStartTimeAuto;
 
   bool inAutoTime = isInAutoTime();
 
@@ -1286,22 +1326,22 @@ void updateRunningAuto()
         }
         else
         {
-          // Nếu đã chạy hết danh sách, kết thúc chu trình và reset autoCurrentSprinkler về 0
+          // Nếu đã chạy hết danh sách, kết thúc chu trình và cập nhật autoCurrentSprinkler = (béc hiện hành + 1) mod 10
           int currentSprinkler = autoSprinklerIndices[autoCycleIndex];
           turnOffCurrentSprinklerAndPump(currentSprinkler);
           autoCycleResting = true;
           autoCycleEndTime = millis();
           currentMenu = MAIN_MENU;
-          autoCurrentSprinkler = 0; // Reset về mặc định béc 1
+          autoCurrentSprinkler = (currentSprinkler + 1) % 10;
           saveConfig();
         }
       }
       else
       {
-        // Nếu không còn trong khoảng AUTO, tắt béc hiện hành và kết thúc chu trình
-        turnOffCurrentSprinklerAndPump(autoSprinklerIndices[autoCycleIndex]);
-        // Cập nhật autoCurrentSprinkler = (béc hiện hành + 1) mod 10
-        autoCurrentSprinkler = (autoSprinklerIndices[autoCycleIndex] + 1) % 10;
+        // Nếu không còn trong khoảng AUTO, tắt béc hiện hành (kết thúc chu trình) và cập nhật autoCurrentSprinkler = (béc hiện hành + 1) mod 10
+        int currentSprinkler = autoSprinklerIndices[autoCycleIndex];
+        turnOffCurrentSprinklerAndPump(currentSprinkler);
+        autoCurrentSprinkler = (currentSprinkler + 1) % 10;
         currentMenu = MAIN_MENU;
         saveConfig();
       }
@@ -1314,7 +1354,7 @@ void updateRunningAuto()
     {
       digitalWrite(relayPins[autoSprinklerIndices[autoCycleIndex]], LOW);
       autoCycleIndex++;
-      runStartTime = millis();
+      runStartTimeAuto = millis();
       transitionActive = false;
       if (autoCycleIndex < autoSprinklerCount)
       {
@@ -1371,7 +1411,7 @@ void checkAutoMode()
           autoCycleIndex = 0;
           initAutoCycleIndices();
           autoCycleResting = false;
-          runStartTime = millis();
+          runStartTimeAuto = millis();
           currentMenu = RUNNING_AUTO;
           // Cập nhật autoCurrentSprinkler khi bắt đầu chu trình mới
           autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
@@ -1383,7 +1423,7 @@ void checkAutoMode()
       {
         initAutoCycleIndices();
         autoCycleIndex = 0;
-        runStartTime = millis();
+        runStartTimeAuto = millis();
         currentMenu = RUNNING_AUTO;
         // Cập nhật autoCurrentSprinkler khi bắt đầu chu trình mới
         autoCurrentSprinkler = autoSprinklerIndices[autoCycleIndex];
@@ -1396,72 +1436,64 @@ void checkAutoMode()
 }
 
 /*
-   checkPower(): Sử dụng ACS712 để đo dòng điện.
-   - Lấy mẫu 10 lần và tính trung bình.
-   - Nếu dòng điện dưới ngưỡng POWER_CURRENT_THRESHOLD, coi như mất điện và tạm dừng chu trình.
-   - Nếu nguồn điện phục hồi và chu trình đang bị tạm dừng do mất điện, tự động resume.
+   Hàm kiểm tra nguồn điện (ACS712) bằng non‑blocking sampling.
+   - Lấy mẫu mỗi 5ms, sau 100 mẫu tính trung bình.
+   - Hiệu chỉnh: nếu giá trị đo được gần 70 mA (±5 mA) hoặc dưới 70 mA thì set về 0, ngược lại trừ đi 70.
+   - Tính điện áp dựa trên ADC (tham chiếu 3.3V).
+   - Nếu dòng điện (sau hiệu chỉnh) < 7 mA thì coi như mất điện, tạm dừng chu trình tưới.
+   - Nếu dòng điện > 7 mA và hệ thống đang bị tạm dừng do mất điện, tự động resume chu trình.
 */
-// Biến toàn cục dùng cho non‑blocking sampling của ACS712
-unsigned long lastPowerSampleTime = 0;       // Thời gian lấy mẫu cuối cùng
-const unsigned long powerSampleInterval = 5; // Khoảng cách giữa các mẫu (ms)
-int powerSampleCount = 0;                    // Số mẫu đã thu thập
-float powerSampleSum = 0.0;                  // Tổng các mẫu dòng điện (mA)
-
 void checkPower()
 {
-  // Nếu đủ thời gian giữa các mẫu, thu thập một mẫu mới.
-  if (millis() - lastPowerSampleTime >= powerSampleInterval)
+  // Các biến static cho non‑blocking sampling
+  static float sampleSum = 0;
+  static int sampleCount = 0;
+  static unsigned long lastSampleTime = 0;
+
+  // Thu thập mẫu mỗi 5ms
+  if (millis() - lastSampleTime >= 5)
   {
-    lastPowerSampleTime = millis();
-    // Thu thập mẫu dòng điện từ ACS712 (mA)
-    powerSampleSum += sensor.mA_AC();
-    powerSampleCount++;
+    lastSampleTime = millis();
+    sampleSum += sensor.mA_AC();
+    sampleCount++;
   }
 
   // Khi thu thập đủ 100 mẫu, tính trung bình và xử lý
-  if (powerSampleCount >= 100)
+  if (sampleCount >= 200)
   {
-    float current_mA = powerSampleSum / 100.0;
+    float current_mA = sampleSum / 200.0;
+    sampleSum = 0;
+    sampleCount = 0;
 
-    if (fabs(current_mA - 70.0) < 5.0 || current_mA < 70.0)
-    {
+    // Hiệu chỉnh: nếu giá trị đo được gần 70 (±5) hoặc dưới 70 thì set về 0, ngược lại trừ đi 70
+    if (fabs(current_mA - POWER_CURRENT_THRESHOLD) < 5.0 || current_mA < POWER_CURRENT_THRESHOLD)
       current_mA = 0;
-    }
     else
-    {
-      current_mA -= 70.0;
-    }
+      current_mA -= POWER_CURRENT_THRESHOLD;
 
-    // Đọc giá trị ADC để tính điện áp (giả sử điện áp tham chiếu là 3.3V)
+    // Tính điện áp với tham chiếu 3.3V
     int rawValue = analogRead(34);
     float voltage = rawValue * 3.3 / 4095.0;
+    lastCurrent_mA = current_mA;
 
-    Serial.print("Voltage: ");
-    Serial.print(voltage, 3);
-    Serial.print(" V, Current: ");
-    Serial.print(current_mA, 2);
-    Serial.println(" mA");
-
-    // Reset bộ đếm mẫu
-    powerSampleCount = 0;
-    powerSampleSum = 0.0;
+    if (!powerCheckEnabled)
+      return;
 
     unsigned long cycleDuration = 0;
     if (currentMenu == RUNNING)
-    {
       cycleDuration = irrigationTime * 60000UL;
-    }
     else if (currentMenu == RUNNING_AUTO)
-    {
       cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
-    }
 
-    // Xử lý pause/resume dựa trên dòng điện đo được
-    if (current_mA < 7)
+    // Nếu dòng điện (sau hiệu chỉnh) < 7 mA thì coi như mất điện
+    if (current_mA < 10.0)
     {
       if (!paused)
-      { // Nếu chưa bị tạm dừng
-        pauseRemaining = cycleDuration - (millis() - runStartTime);
+      { // Nếu chưa tạm dừng
+        if (currentMenu == RUNNING)
+          pauseRemainingManual = cycleDuration - (millis() - runStartTimeManual);
+        else if (currentMenu == RUNNING_AUTO)
+          pauseRemainingAuto = cycleDuration - (millis() - runStartTimeAuto);
         paused = true;
         powerPaused = true;
         for (int i = 0; i < 12; i++)
@@ -1477,12 +1509,12 @@ void checkPower()
       {
         if (currentMenu == RUNNING)
         {
-          runStartTime = millis() - (cycleDuration - pauseRemaining);
+          runStartTimeManual = millis() - (cycleDuration - pauseRemainingManual);
           activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
         }
         else if (currentMenu == RUNNING_AUTO)
         {
-          runStartTime = millis() - (cycleDuration - pauseRemaining);
+          runStartTimeAuto = millis() - (cycleDuration - pauseRemainingAuto);
           activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
         }
         paused = false;
