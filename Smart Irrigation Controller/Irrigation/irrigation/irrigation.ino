@@ -1,9 +1,9 @@
 // ==================== THÔNG TIN CẤU HÌNH VÀ THƯ VIỆN ====================
 
 // Cấu hình Blynk
-#define BLYNK_TEMPLATE_ID "TMPL6ZR2keF5J"
+#define BLYNK_TEMPLATE_ID "TMPL6xy4mK0KN"
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
-#define BLYNK_AUTH_TOKEN "x-Uc3uA1wCZtbDWniO6yWTDrLHsVqOJ-"
+#define BLYNK_AUTH_TOKEN "J34tRXWg_QTXt8bs0SfbZFSc1ARUpL0o"
 
 // Thư viện sử dụng
 #include <Preferences.h>
@@ -20,8 +20,8 @@
 // ==================== CẤU HÌNH CHUNG ====================
 
 // WiFi và Blynk
-char ssid[] = "VU ne";
-char pass[] = "12341234";
+char ssid[] = "KHONG TEN";
+char pass[] = "123456789";
 
 // Đối tượng Preferences để lưu cấu hình trên flash
 Preferences preferences;
@@ -253,6 +253,67 @@ String formatRemainingTime(unsigned long seconds)
   char buf[9];
   sprintf(buf, "%02u:%02u:%02u", h, m, s);
   return String(buf);
+}
+
+// ==================== Blynk Virtual Pin Callbacks ====================
+// Điều khiển béc tưới: V1 - V10
+BLYNK_WRITE(V1) { digitalWrite(relayPins[0], param.asInt()); }
+BLYNK_WRITE(V2) { digitalWrite(relayPins[1], param.asInt()); }
+BLYNK_WRITE(V3) { digitalWrite(relayPins[2], param.asInt()); }
+BLYNK_WRITE(V4) { digitalWrite(relayPins[3], param.asInt()); }
+BLYNK_WRITE(V5) { digitalWrite(relayPins[4], param.asInt()); }
+BLYNK_WRITE(V6) { digitalWrite(relayPins[5], param.asInt()); }
+BLYNK_WRITE(V7) { digitalWrite(relayPins[6], param.asInt()); }
+BLYNK_WRITE(V8) { digitalWrite(relayPins[7], param.asInt()); }
+BLYNK_WRITE(V9) { digitalWrite(relayPins[8], param.asInt()); }
+BLYNK_WRITE(V10) { digitalWrite(relayPins[9], param.asInt()); }
+
+// Điều khiển bơm: V11 và V12 với cơ chế bảo vệ
+BLYNK_WRITE(V11)
+{
+  int state = param.asInt();
+  bool sprayerActive = false;
+  for (int i = 0; i < 10; i++)
+  {
+    if (digitalRead(relayPins[i]) == HIGH)
+    {
+      sprayerActive = true;
+      break;
+    }
+  }
+  if (state == 1 && !sprayerActive)
+  {
+    Blynk.logEvent("pump_protect", "Không có béc được bật. Tắt bơm 1");
+    digitalWrite(relayPins[10], LOW);
+    syncRelayStatusToBlynk();
+  }
+  else
+  {
+    digitalWrite(relayPins[10], state);
+  }
+}
+BLYNK_WRITE(V12)
+{
+  int state = param.asInt();
+  bool sprayerActive = false;
+  for (int i = 0; i < 10; i++)
+  {
+    if (digitalRead(relayPins[i]) == HIGH)
+    {
+      sprayerActive = true;
+      break;
+    }
+  }
+  if (state == 1 && !sprayerActive)
+  {
+    Blynk.logEvent("pump_protect", "Không có béc được bật. Tắt bơm 2");
+    digitalWrite(relayPins[11], LOW);
+    syncRelayStatusToBlynk();
+  }
+  else
+  {
+    digitalWrite(relayPins[11], state);
+  }
 }
 
 // ==================== HÀM ĐIỀU KHIỂN BƠM VÀ BÉC TƯỚI ====================
@@ -1435,95 +1496,6 @@ void checkAutoMode()
   // Nếu không còn trong khoảng thời gian AUTO, hệ thống cho phép hoàn tất chu trình hiện hành.
 }
 
-/*
-   Hàm kiểm tra nguồn điện (ACS712) bằng non‑blocking sampling.
-   - Lấy mẫu mỗi 5ms, sau 100 mẫu tính trung bình.
-   - Hiệu chỉnh: nếu giá trị đo được gần 70 mA (±5 mA) hoặc dưới 70 mA thì set về 0, ngược lại trừ đi 70.
-   - Tính điện áp dựa trên ADC (tham chiếu 3.3V).
-   - Nếu dòng điện (sau hiệu chỉnh) < 7 mA thì coi như mất điện, tạm dừng chu trình tưới.
-   - Nếu dòng điện > 7 mA và hệ thống đang bị tạm dừng do mất điện, tự động resume chu trình.
-*/
-void checkPower()
-{
-  // Các biến static cho non‑blocking sampling
-  static float sampleSum = 0;
-  static int sampleCount = 0;
-  static unsigned long lastSampleTime = 0;
-
-  // Thu thập mẫu mỗi 5ms
-  if (millis() - lastSampleTime >= 5)
-  {
-    lastSampleTime = millis();
-    sampleSum += sensor.mA_AC();
-    sampleCount++;
-  }
-
-  // Khi thu thập đủ 100 mẫu, tính trung bình và xử lý
-  if (sampleCount >= 200)
-  {
-    float current_mA = sampleSum / 200.0;
-    sampleSum = 0;
-    sampleCount = 0;
-
-    // Hiệu chỉnh: nếu giá trị đo được gần 70 (±5) hoặc dưới 70 thì set về 0, ngược lại trừ đi 70
-    if (fabs(current_mA - POWER_CURRENT_THRESHOLD) < 5.0 || current_mA < POWER_CURRENT_THRESHOLD)
-      current_mA = 0;
-    else
-      current_mA -= POWER_CURRENT_THRESHOLD;
-
-    // Tính điện áp với tham chiếu 3.3V
-    int rawValue = analogRead(34);
-    float voltage = rawValue * 3.3 / 4095.0;
-    lastCurrent_mA = current_mA;
-
-    if (!powerCheckEnabled)
-      return;
-
-    unsigned long cycleDuration = 0;
-    if (currentMenu == RUNNING)
-      cycleDuration = irrigationTime * 60000UL;
-    else if (currentMenu == RUNNING_AUTO)
-      cycleDuration = ((unsigned long)(autoDurationHour * 60 + autoDurationMinute)) * 60000UL;
-
-    // Nếu dòng điện (sau hiệu chỉnh) < 7 mA thì coi như mất điện
-    if (current_mA < 10.0)
-    {
-      if (!paused)
-      { // Nếu chưa tạm dừng
-        if (currentMenu == RUNNING)
-          pauseRemainingManual = cycleDuration - (millis() - runStartTimeManual);
-        else if (currentMenu == RUNNING_AUTO)
-          pauseRemainingAuto = cycleDuration - (millis() - runStartTimeAuto);
-        paused = true;
-        powerPaused = true;
-        for (int i = 0; i < 12; i++)
-        {
-          digitalWrite(relayPins[i], LOW);
-        }
-        Serial.println("Power lost: Pausing irrigation.");
-      }
-    }
-    else
-    {
-      if (powerPaused && paused)
-      {
-        if (currentMenu == RUNNING)
-        {
-          runStartTimeManual = millis() - (cycleDuration - pauseRemainingManual);
-          activatePumpForSprinkler(runSprinklerIndices[currentRunIndex]);
-        }
-        else if (currentMenu == RUNNING_AUTO)
-        {
-          runStartTimeAuto = millis() - (cycleDuration - pauseRemainingAuto);
-          activatePumpForSprinkler(autoSprinklerIndices[autoCycleIndex]);
-        }
-        paused = false;
-        powerPaused = false;
-        Serial.println("Power restored: Resuming irrigation.");
-      }
-    }
-  }
-}
 
 /*
    Hàm lưu & tải cấu hình từ flash sử dụng Preferences
@@ -1712,8 +1684,6 @@ void loop()
     currentMenu = MAIN_MENU;
     nonBlockingDelayActive = false;
   }
-
-  checkPower();
 
   Blynk.run();
   timer.run();
