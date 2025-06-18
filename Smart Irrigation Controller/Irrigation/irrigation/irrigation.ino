@@ -2,37 +2,39 @@
   ESP32 Coffee Garden Irrigation System
   - 10 Valves, 2 Pumps (Relays)
   - IR Remote Control for Menu Navigation
-  - LCD 20x4 via I2C (PCF8574) using LiquidCrystal_PCF8574
+  - LCD 20x4 via I²C (PCF8574) using LiquidCrystal_PCF8574
   - ACS712 Current Sensor for Power Check
   - Blynk Integration (12 Switches: 10 Valves + 2 Pumps)
-  - Preferences (RTC Memory) for Saving Configurations
-  - Manual (Delay-Based) and Automatic (Time-Based) Irrigation Modes
-
-  Note:
-  - Thay đổi Blynk Auth Token, WiFi SSID, Password cho phù hợp.
-  - Địa chỉ I²C của LCD phải đúng (mặc định 0x27).
-  - Mô-đun ACS712 30A: độ nhạy ~66mV/A. Điều chỉnh nếu dùng loại khác.
-  - Sử dụng NTP để đồng bộ thời gian (Asia/Ho_Chi_Minh, UTC+7).
+  - Preferences (NVS) for Saving Configurations
+  - Manual (Time-based start) and Automatic (Time-Based) Irrigation Modes
+  - WiFi Manager for easy network configuration
 */
 
+// ======================
+// === BLYNK DEFINES ===
+// ======================
 #define BLYNK_TEMPLATE_ID "TMPL6xy4mK0KN"
 #define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
 #define BLYNK_AUTH_TOKEN "J34tRXWg_QTXt8bs0SfbZFSc1ARUpL0o"
+#define BLYNK_PRINT Serial // Redirect Blynk logs to Serial
 
+// ======================
+// === INCLUDES ===
+// ======================
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Wire.h>
-#include <LiquidCrystal_PCF8574.h>   // Thư viện LCD PCF8574
+#include <LiquidCrystal_PCF8574.h>
 #include <IRremote.h>
 #include <BlynkSimpleEsp32.h>
 #include <time.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 
 // ======================
-// === HARDWARE MAP ===
+// === HARDWARE PINS ===
 // ======================
-
-// Relay pins: 10 Valves, 2 Pumps
+// Relay pins: 10 Valves, 2 Pumps (Active LOW)
 static const uint8_t relayValvePins[10] = {2, 4, 16, 17, 5, 18, 19, 21, 22, 23};
 static const uint8_t relayPumpPins[2]   = {26, 25};
 
@@ -41,6 +43,8 @@ static const uint8_t IR_RECEIVER_PIN = 15;
 
 // LCD (I2C PCF8574)
 static const uint8_t LCD_I2C_ADDR = 0x27;
+static const uint8_t LCD_SDA_PIN = 13;
+static const uint8_t LCD_SCL_PIN = 14;
 LiquidCrystal_PCF8574 lcd(LCD_I2C_ADDR);
 
 // ACS712 (Analog Current Sensor)
@@ -60,27 +64,14 @@ static const uint8_t ACS712_PIN = 34;
 #define IR_CODE_9      0xF609FF00UL
 #define IR_CODE_0      0xE619FF00UL
 
-#define IR_CODE_STAR   0xE916FF00UL  // CANCEL
-#define IR_CODE_HASH   0xF20DFF00UL  // SAVE
+#define IR_CODE_STAR   0xE916FF00UL  // CANCEL / BACK
+#define IR_CODE_HASH   0xF20DFF00UL  // SAVE / CONFIRM
 
 #define IR_CODE_UP     0xE718FF00UL
 #define IR_CODE_DOWN   0xAD52FF00UL
 #define IR_CODE_RIGHT  0xA55AFF00UL
 #define IR_CODE_LEFT   0xF708FF00UL
 #define IR_CODE_OK     0xE31CFF00UL
-
-// ======================
-// === BLYNK CONFIG ===
-// ======================
-char ssid[] = "VU ne";
-char pass[] = "12341234";
-
-// Virtual Pins: V0..V9 for Valves 1..10, V10..V11 for Pumps 1..2
-
-// ======================
-// === PREFERENCES ===
-// ======================
-Preferences prefs;
 
 // ======================
 // === TYPE DEFINITIONS ===
@@ -104,16 +95,17 @@ struct TimeHM {
 };
 
 // ======================
-// === GLOBAL STATE ===
+// === GLOBAL STATE & CONFIGURATION ===
 // ======================
+Preferences prefs;
 
-// Relay states
+// Relay states (saved in Preferences, working is for current edits)
 bool savedValveState[10];
 bool workingValveState[10];
 bool savedPumpState[2];
 bool workingPumpState[2];
 
-// Delay (seconds) for all valves
+// Delay (seconds) for manual irrigation cycle duration and auto mode valve step
 uint16_t savedDelaySec;
 uint16_t workingDelaySec;
 
@@ -121,333 +113,457 @@ uint16_t workingDelaySec;
 bool savedPowerCheckEnabled;
 bool workingPowerCheckEnabled;
 
-// Automatic mode
+// Automatic mode settings
 bool savedAutoEnabled;
 bool workingAutoEnabled;
 
-uint8_t savedAutoStartIndex;
+uint8_t savedAutoStartIndex;  // 1-10 for display, internally 0-9
 uint8_t workingAutoStartIndex;
 
 TimeHM savedAutoFrom, workingAutoFrom;
-TimeHM savedAutoTo,   workingAutoTo;
+TimeHM savedAutoTo, workingAutoTo;
 TimeHM savedDuration, workingDuration;
-TimeHM savedRest,     workingRest;
+TimeHM savedRest, workingRest;
 
-// Manual mode (delay-based)
-uint8_t manualHour;      // 0..99
-uint8_t manualMin;       // 0..59
-bool editingManualHour;  // true = editing hour, false = editing minute
-bool manualScheduled;    // true = a manual timer has been set
-uint32_t nextManualMillis;
+// Manual mode (time-based start for a single cycle using savedValveState)
+uint8_t manualHour;
+uint8_t manualMin;
+bool editingManualHour;
+bool manualScheduled;
+bool isManualRunning;
+unsigned long manualStartMillis;
 
-// Application state
+// Numeric input for IR
+uint8_t irNumericBuffer = 0;
+uint8_t irNumericDigits = 0;
+
+// Application navigation state
 AppState currentAppState = STATE_MAIN;
-uint8_t mainMenuIndex = 0;       // 0=Cấu hình, 1=Thủ công, 2=Tự động
+uint8_t mainMenuIndex = 0;       // 0=Config, 1=Manual, 2=Auto
+
 ConfigMode currentConfigMode = MODE_ONOFF;
 uint8_t configMenuPage = 0;      // For ON/OFF mode paging
 uint8_t configMenuIndex = 0;     // Index within current page
 
-// Auto mode selection state
-uint8_t autoMenuSelectedIndex = 0; // 0=ON,1=OFF,2=RESET,3=SELECT_VALVE,4=TIME_SETUP
-uint8_t autoMenuPage = 0; // page for auto menu
-const uint8_t autoMenuItems = 5;
-const uint8_t autoMenuItemsOnPage = 3;
-uint8_t autoSelectField = 0; // field for time selection
-bool inSelectValve = false;
-bool inTimeSetup = false;
+// Auto mode navigation and operation
+uint8_t autoMenuIndex = 0;        // Current selected item in auto menu
+uint8_t autoMenuPage = 0;         // Current page in auto menu
+bool inSelectValve = false;       // Auto valve selection mode
+bool inTimeSetup = false;         // Auto time setup mode
+uint8_t autoSelectField = 0;      // Field for time selection (0-7)
 
-// Flags for running tasks
+// Operational flags
 bool autoRunning = false;
-uint32_t autoLastActionMillis = 0;
-bool autoStep = false;  // false = waiting to start next valve; true = in rest/duration wait
+unsigned long autoLastActionMillis = 0;
+uint8_t autoCurrentValve = 0;     // 0-9 index
+bool autoStep = false;            // false = valve on, true = rest period
 
-// Utility
+// Blink state for UI elements
+unsigned long lastBlinkMillis = 0;
+bool blinkState = false;
+
+// Power check variables
+const float POWER_THRESHOLD_AMPS = 0.1;
+unsigned long lastPowerCheckMillis = 0;
+const unsigned long POWER_CHECK_INTERVAL = 2000; // Check every 2 seconds
+
+// WiFi and Blynk
+char blynkAuthToken[] = BLYNK_AUTH_TOKEN;
+
+// NTP settings
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 7 * 3600; // GMT+7 (Vietnam)
+const int daylightOffset_sec = 0;
+
+// ======================
+// === FUNCTION DECLARATIONS ===
+// ======================
+void initializeHardware();
+void initializeWiFi();
+void initializeTime();
+void loadConfigFromPrefs();
+void saveConfigToPrefs();
+void updateOutputsFromWorking();
+void drawMainMenu();
+void drawConfigMenu();
+void drawManualMenu();
+void drawAutoMenu();
+void handleIR(uint32_t code);
+void handleMainIR(uint32_t code);
+void handleConfigIR(uint32_t code);
+void handleManualIR(uint32_t code);
+void handleAutoIR(uint32_t code);
+float readACS712Current();
+void turnAllOff();
+bool isAnyValveOpen();
+bool anySavedValveOpen();
 bool nowInTimeRange(const TimeHM &from, const TimeHM &to);
 TimeHM getCurrentTimeHM();
+bool nowMatchesManualTime();
+void checkPowerStatus();
+void runManualIrrigation();
+void runAutoIrrigation();
+void resetIRNumericInput();
 
-// Blink state for manual and auto menus
-unsigned long lastManualBlink = 0;
-bool manualBlinkState = false;
-unsigned long lastAutoBlink = 0;
-bool autoBlinkState = false;
+// ======================
+// === BLYNK VIRTUAL PIN HANDLERS ===
+// ======================
+BLYNK_WRITE(V0) { workingValveState[0] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V1) { workingValveState[1] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V2) { workingValveState[2] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V3) { workingValveState[3] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V4) { workingValveState[4] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V5) { workingValveState[5] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V6) { workingValveState[6] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V7) { workingValveState[7] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V8) { workingValveState[8] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V9) { workingValveState[9] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V10) { workingPumpState[0] = param.asInt(); updateOutputsFromWorking(); }
+BLYNK_WRITE(V11) { workingPumpState[1] = param.asInt(); updateOutputsFromWorking(); }
 
 // ======================
 // === SETUP ===
 // ======================
 void setup() {
-  // Serial for debugging
   Serial.begin(115200);
-  while (!Serial) { delay(10); }
+  delay(100);
+  Serial.println("\n[SETUP] He Thong Tuoi Vuon Ca Phe - Khoi Dong...");
 
-  // Initialize hardware (relay pins, IR pin, LCD, etc.)
   initializeHardware();
 
-  WiFi.begin(ssid, pass);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(100);
-    Serial.print(".");
-  }
-  Serial.println("WiFi connected");
+  prefs.begin("cfg", false); // Namespace for preferences
+  loadConfigFromPrefs(); // Load saved settings
 
+  initializeWiFi();
+  initializeTime();
 
-  // Initialize Preferences
-  prefs.begin("cfg", false);
-  loadConfigFromPrefs();
-  // Initialize working state from saved state
-  memcpy(workingValveState, savedValveState, sizeof(savedValveState));
-  memcpy(workingPumpState,  savedPumpState,  sizeof(savedPumpState));
-  workingDelaySec           = savedDelaySec;
-  workingPowerCheckEnabled  = savedPowerCheckEnabled;
-  workingAutoEnabled        = savedAutoEnabled;
-  workingAutoStartIndex     = savedAutoStartIndex;
-  workingAutoFrom           = savedAutoFrom;
-  workingAutoTo             = savedAutoTo;
-  workingDuration           = savedDuration;
-  workingRest               = savedRest;
-  manualScheduled           = false;
-  editingManualHour         = true;
-  manualHour                = 0;
-  manualMin                 = 0;
+  IrReceiver.begin(IR_RECEIVER_PIN, ENABLE_LED_FEEDBACK); // Start IR receiver
 
-  // Initialize Blynk
-  Blynk.config(BLYNK_AUTH_TOKEN);
-  Blynk.connect(1000);
+  // Initialize defaults for manual and auto modes
+  manualScheduled = false;
+  isManualRunning = false;
+  editingManualHour = true;
+  manualHour = 0;
+  manualMin = 0;
 
-  // Initialize IR
-  IrReceiver.begin(IR_RECEIVER_PIN, ENABLE_LED_FEEDBACK); // Bắt đầu nhận IR
-
-  // Initialize NTP for local time (Asia/Ho_Chi_Minh = UTC+7)
-  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-
-  // Initial LCD display (hiển thị menu chính ngay sau khởi động)
+  Serial.println("[SETUP] Khoi dong hoan tat.");
   drawMainMenu();
-
-  // Sync relays và Blynk trên startup
-  updateOutputsFromWorking();
+  updateOutputsFromWorking(); // Sync relays and Blynk on startup
 }
 
 // ======================
 // === MAIN LOOP ===
 // ======================
 void loop() {
-  // Blynk
-  Blynk.run();
+  Blynk.run(); // Process Blynk tasks
 
-
-  // IR processing
+  // Process IR remote input
   if (IrReceiver.decode()) {
-    uint32_t code = IrReceiver.decodedIRData.decodedRawData;
-    Serial.println(code, HEX);
-    handleIR(code);
-    IrReceiver.resume();
+    uint32_t irCode = IrReceiver.decodedIRData.decodedRawData;
+    if (irCode != 0) {
+      Serial.print("[IR] Ma nhan duoc: 0x");
+      Serial.println(irCode, HEX);
+      handleIR(irCode);
+    }
+    IrReceiver.resume(); // Ready for next IR signal
   }
 
-  // Blink for manual menu
-  if (currentAppState == STATE_MANUAL) {
-    if (millis() - lastManualBlink > 300) {
-      manualBlinkState = !manualBlinkState;
-      lastManualBlink = millis();
-      drawManualMenu();
-    }
-  }
-  // Blink for auto time select
-  if (currentAppState == STATE_AUTO && autoMenuSelectedIndex == 4) {
-    if (millis() - lastAutoBlink > 300) {
-      autoBlinkState = !autoBlinkState;
-      lastAutoBlink = millis();
-      drawAutoMenu();
-    }
-  }
+  // UI Blinking Logic
+  if (millis() - lastBlinkMillis > 500) {
+    lastBlinkMillis = millis();
+    blinkState = !blinkState;
 
-  // Power Check
-  if (workingPowerCheckEnabled) {
-    float currentA = readACS712Current();
-    if (currentA < 0.1) {
-      // Power lost
-      turnAllOff();
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("MẤT NGUỒN");
-        lcd.setCursor(0, 1);
-      lcd.print("CHECK POWER");
-      delay(2000);
-      drawMainMenu();
-      // Restore app state
-      currentAppState = STATE_MAIN;
-    }
-  }
-
-  // Manual mode check (delay-based)
-  if (manualScheduled) {
-    uint32_t nowMs = millis();
-    if (nowMs >= nextManualMillis) {
-      manualScheduled = false;
-      // Execute watering as per savedValveState
-      for (uint8_t i = 0; i < 10; i++) {
-        workingValveState[i] = savedValveState[i];
+    // Redraw UI if it has blinking elements
+    if ((currentAppState == STATE_MANUAL) ||
+        (currentAppState == STATE_AUTO && inTimeSetup)) {
+      if (currentAppState == STATE_MANUAL) {
+        drawManualMenu();
+      } else if (currentAppState == STATE_AUTO) {
+        drawAutoMenu();
       }
-      updateOutputsFromWorking();
-      delay(savedDelaySec * 1000UL);
-      // Turn off all valves
+    }
+  }
+
+  // Periodic Power Check
+  if (workingPowerCheckEnabled && (millis() - lastPowerCheckMillis > POWER_CHECK_INTERVAL)) {
+    lastPowerCheckMillis = millis();
+    checkPowerStatus();
+  }
+
+  // Manual Irrigation Logic
+  if (manualScheduled && !isManualRunning) {
+    if (nowMatchesManualTime()) {
+      runManualIrrigation();
+    }
+  }
+
+  // Check if manual irrigation is running and needs to be stopped
+  if (isManualRunning) {
+    if (millis() - manualStartMillis >= savedDelaySec * 1000UL) {
+      // Stop irrigation
       for (uint8_t i = 0; i < 10; i++) {
         workingValveState[i] = false;
       }
       updateOutputsFromWorking();
+      isManualRunning = false;
+      manualScheduled = false;
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("TUOI THU CONG XONG");
+      delay(2000);
+      currentAppState = STATE_MAIN;
+      drawMainMenu();
     }
   }
 
-  // Automatic mode check (time-based)
-  if (workingAutoEnabled) {
-    if (nowInTimeRange(savedAutoFrom, savedAutoTo)) {
-      if (!autoRunning) {
-        // Start first cycle
-        autoRunning = true;
-        autoStep = false;
-      }
-      if (!autoStep) {
-        // Turn on the current valve
-        for (uint8_t i = 0; i < 10; i++) {
-          workingValveState[i] = (i == (savedAutoStartIndex - 1));
-        }
-        updateOutputsFromWorking();
-        autoLastActionMillis = millis();
-        autoStep = true;
-      } else {
-        // We are in duration/rest cycle
-        uint32_t elapsed = millis() - autoLastActionMillis;
-        uint32_t durMs = (savedDuration.hour * 3600UL + savedDuration.minute * 60UL) * 1000UL;
-        uint32_t restMs = (savedRest.hour * 3600UL + savedRest.minute * 60UL) * 1000UL;
-        if (elapsed >= durMs) {
-          // Duration elapsed: turn off current valve
-          for (uint8_t i = 0; i < 10; i++) {
-            workingValveState[i] = false;
-          }
-          updateOutputsFromWorking();
-          // Wait rest
-          autoLastActionMillis = millis();
-          while (millis() - autoLastActionMillis < restMs) {
-            // Check power and Blynk during rest
-            if (workingPowerCheckEnabled && (readACS712Current() < 0.1)) {
-              turnAllOff();
-              autoRunning = false;
-      break;
-    }
-            Blynk.run();
-          }
-          // Advance to next valve
-          savedAutoStartIndex++;
-          if (savedAutoStartIndex > 10) savedAutoStartIndex = 1;
-          autoStep = false; // Next: start next valve
-        }
-      }
-    } else {
-      // Outside auto window: turn all off và reset
-      if (autoRunning) {
-        turnAllOff();
-        autoRunning = false;
-      }
-    }
+  // Automatic Irrigation Logic
+  if (savedAutoEnabled) {
+    runAutoIrrigation();
   }
 
-  // Tránh vòng lặp quá nhanh
-  delay(50);
+  delay(20); // Small delay to yield CPU
 }
 
 // ======================
 // === INITIALIZATION FUNCTIONS ===
 // ======================
 void initializeHardware() {
-  // Relay pins
+  // Initialize relay pins (Active LOW: LOW = ON, HIGH = OFF)
   for (uint8_t i = 0; i < 10; i++) {
     pinMode(relayValvePins[i], OUTPUT);
-    digitalWrite(relayValvePins[i], HIGH);  // OFF (LOW = ON)
+    digitalWrite(relayValvePins[i], HIGH);  // Default OFF
   }
   for (uint8_t j = 0; j < 2; j++) {
     pinMode(relayPumpPins[j], OUTPUT);
-    digitalWrite(relayPumpPins[j], HIGH);  // OFF
+    digitalWrite(relayPumpPins[j], HIGH);  // Default OFF
   }
 
-  // IR Receiver
-  pinMode(IR_RECEIVER_PIN, INPUT);
-
-  // LCD Initialization
-  Wire.begin(13, 14);               // Khởi tạo I2C
-  lcd.begin(20, 4);            // Đặt kích thước 20x4
-  lcd.setBacklight(255);       // Bật đèn nền tối đa
+  // Initialize LCD
+  Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  lcd.begin(20, 4); // 20 columns, 4 rows
+  lcd.setBacklight(255); // Max backlight
+  lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("LCD initialized");
-  delay(100);                  // Chờ ổn định LCD
+  lcd.print("HE THONG TUOI VUON");
+  lcd.setCursor(0, 1);
+  lcd.print("DANG KHOI DONG...");
+
+  Serial.println("[HW] Hardware initialized.");
+}
+
+void initializeWiFi() {
+  Serial.println("[WIFI] Connecting to WiFi...");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("KET NOI WIFI...");
+
+  // Use WiFiManager for easier WiFi setup
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // Portal stays active for 3 minutes
+
+  if (!wm.autoConnect("IrrigationSystem")) {
+    Serial.println("[WIFI] Failed to connect WiFi, retrying...");
+    lcd.setCursor(0, 1);
+    lcd.print("KHONG THE KET NOI!");
+    delay(2000);
+    ESP.restart();
+  }
+
+  Serial.print("[WIFI] Connected! IP: ");
+  Serial.println(WiFi.localIP());
+
+  lcd.setCursor(0, 1);
+  lcd.print("WIFI OK: ");
+  lcd.print(WiFi.SSID());
+
+  lcd.setCursor(0, 2);
+  lcd.print("KET NOI BLYNK...");
+
+  // Initialize Blynk
+  Blynk.config(blynkAuthToken);
+  if (Blynk.connect()) {
+    Serial.println("[BLYNK] Connected.");
+    lcd.print(" OK");
+  } else {
+    Serial.println("[BLYNK] Connection failed.");
+    lcd.print(" LOI");
+  }
+  delay(1000);
+}
+
+void initializeTime() {
+  Serial.println("[TIME] Setting up NTP time...");
+  lcd.setCursor(0, 3);
+  lcd.print("CAI DAT GIO...");
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    Serial.print("[TIME] Current time: ");
+    Serial.println(&timeinfo, "%H:%M:%S");
+    lcd.print(" OK");
+  } else {
+    Serial.println("[TIME] Failed to obtain time.");
+    lcd.print(" LOI");
+  }
+  delay(1000);
 }
 
 // ======================
-// === PREFERENCES ===
+// === PREFERENCES (NVS Storage) ===
 // ======================
 void loadConfigFromPrefs() {
   // Valves
   for (uint8_t i = 0; i < 10; i++) {
     String key = "v" + String(i);
     savedValveState[i] = prefs.getBool(key.c_str(), false);
+    workingValveState[i] = savedValveState[i];
   }
+
   // Pumps
   savedPumpState[0] = prefs.getBool("p0", false);
   savedPumpState[1] = prefs.getBool("p1", false);
+  workingPumpState[0] = savedPumpState[0];
+  workingPumpState[1] = savedPumpState[1];
+
   // Delay
-  savedDelaySec = prefs.getUInt("delay", 5);
+  savedDelaySec = prefs.getUInt("delay", 10);  // Default 10s
+  workingDelaySec = savedDelaySec;
+
   // Power Check
   savedPowerCheckEnabled = prefs.getBool("power", false);
-  // Auto
+  workingPowerCheckEnabled = savedPowerCheckEnabled;
+
+  // Auto mode
   savedAutoEnabled = prefs.getBool("ae", false);
-  savedAutoStartIndex = prefs.getUInt("as", 1);
-  savedAutoFrom.hour   = prefs.getUInt("afh", 0);
+  workingAutoEnabled = savedAutoEnabled;
+
+  savedAutoStartIndex = prefs.getUInt("as", 1);  // 1-10 for display
+  workingAutoStartIndex = savedAutoStartIndex;
+
+  savedAutoFrom.hour = prefs.getUInt("afh", 6);    // 6:00 AM default
   savedAutoFrom.minute = prefs.getUInt("afm", 0);
-  savedAutoTo.hour     = prefs.getUInt("ath", 0);
-  savedAutoTo.minute   = prefs.getUInt("atm", 0);
-  savedDuration.hour   = prefs.getUInt("adh", 0);
-  savedDuration.minute = prefs.getUInt("adm", 1);
-  savedRest.hour       = prefs.getUInt("arh", 0);
-  savedRest.minute     = prefs.getUInt("arm", 1);
+  workingAutoFrom = savedAutoFrom;
+
+  savedAutoTo.hour = prefs.getUInt("ath", 8);      // 8:00 AM default
+  savedAutoTo.minute = prefs.getUInt("atm", 0);
+  workingAutoTo = savedAutoTo;
+
+  savedDuration.hour = prefs.getUInt("adh", 0);    // 5 minutes default
+  savedDuration.minute = prefs.getUInt("adm", 5);
+  workingDuration = savedDuration;
+
+  savedRest.hour = prefs.getUInt("arh", 0);        // 1 minute default
+  savedRest.minute = prefs.getUInt("arm", 1);
+  workingRest = savedRest;
+
+  Serial.println("[PREFS] Configuration loaded.");
 }
 
 void saveConfigToPrefs() {
   // Valves
   for (uint8_t i = 0; i < 10; i++) {
     String key = "v" + String(i);
-    prefs.putBool(key.c_str(), savedValveState[i]);
+    prefs.putBool(key.c_str(), workingValveState[i]);
+    savedValveState[i] = workingValveState[i];
   }
+
   // Pumps
-  prefs.putBool("p0", savedPumpState[0]);
-  prefs.putBool("p1", savedPumpState[1]);
+  prefs.putBool("p0", workingPumpState[0]);
+  prefs.putBool("p1", workingPumpState[1]);
+  savedPumpState[0] = workingPumpState[0];
+  savedPumpState[1] = workingPumpState[1];
+
   // Delay
-  prefs.putUInt("delay", savedDelaySec);
+  prefs.putUInt("delay", workingDelaySec);
+  savedDelaySec = workingDelaySec;
+
   // Power Check
-  prefs.putBool("power", savedPowerCheckEnabled);
-  // Auto
-  prefs.putBool("ae", savedAutoEnabled);
-  prefs.putUInt("as", savedAutoStartIndex);
-  prefs.putUInt("afh", savedAutoFrom.hour);
-  prefs.putUInt("afm", savedAutoFrom.minute);
-  prefs.putUInt("ath", savedAutoTo.hour);
-  prefs.putUInt("atm", savedAutoTo.minute);
-  prefs.putUInt("adh", savedDuration.hour);
-  prefs.putUInt("adm", savedDuration.minute);
-  prefs.putUInt("arh", savedRest.hour);
-  prefs.putUInt("arm", savedRest.minute);
+  prefs.putBool("power", workingPowerCheckEnabled);
+  savedPowerCheckEnabled = workingPowerCheckEnabled;
+
+  // Auto mode
+  prefs.putBool("ae", workingAutoEnabled);
+  savedAutoEnabled = workingAutoEnabled;
+
+  prefs.putUInt("as", workingAutoStartIndex);
+  savedAutoStartIndex = workingAutoStartIndex;
+
+  prefs.putUInt("afh", workingAutoFrom.hour);
+  prefs.putUInt("afm", workingAutoFrom.minute);
+  savedAutoFrom = workingAutoFrom;
+
+  prefs.putUInt("ath", workingAutoTo.hour);
+  prefs.putUInt("atm", workingAutoTo.minute);
+  savedAutoTo = workingAutoTo;
+
+  prefs.putUInt("adh", workingDuration.hour);
+  prefs.putUInt("adm", workingDuration.minute);
+  savedDuration = workingDuration;
+
+  prefs.putUInt("arh", workingRest.hour);
+  prefs.putUInt("arm", workingRest.minute);
+  savedRest = workingRest;
+
+  Serial.println("[PREFS] Configuration saved.");
 }
 
 // ======================
-// === ADC / POWER CHECK ===
+// === OUTPUT & SENSOR FUNCTIONS ===
 // ======================
+void updateOutputsFromWorking() {
+  // Valves (Active LOW: LOW = ON, HIGH = OFF)
+  for (uint8_t i = 0; i < 10; i++) {
+    digitalWrite(relayValvePins[i], workingValveState[i] ? LOW : HIGH);
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(i, workingValveState[i] ? 1 : 0);
+    }
+  }
+
+  // Check if any valve is open before allowing pump activation
+  bool anyValveOpen = isAnyValveOpen();
+
+  // Pumps (Active LOW: LOW = ON, HIGH = OFF)
+  for (uint8_t j = 0; j < 2; j++) {
+    // Prevent pumps from running if no valves are open
+    if (!anyValveOpen) {
+      workingPumpState[j] = false;
+    }
+    digitalWrite(relayPumpPins[j], workingPumpState[j] ? LOW : HIGH);
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(10 + j, workingPumpState[j] ? 1 : 0);
+    }
+  }
+}
+
 float readACS712Current() {
-  int raw = analogRead(ACS712_PIN);
-  float voltage = (raw / 4095.0) * 3.3;       // ESP32 ADC reference 3.3V
-  float offset = 2.5;                         // ACS712 zero-current voltage
-  float sensitivity = 0.066;                  // 66 mV/A cho module 30A
-  float current = (voltage - offset) / sensitivity;
-  if (current < 0) current = -current;        // Lấy trị tuyệt đối
+  // Read multiple samples for accuracy
+  const int samples = 10;
+  int total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(ACS712_PIN);
+    delay(1);
+  }
+
+  int average = total / samples;
+
+  // Convert ADC value to voltage
+  float voltage = (average / 4095.0) * 3.3;
+
+  // Convert voltage to current (ACS712 30A model)
+  // Sensitivity: 66 mV/A, Offset: 2.5V (when 0A)
+  float offset = 2.5;
+  float sensitivity = 0.066;
+  float current = abs((voltage - offset) / sensitivity);
+
   return current;
 }
 
 void turnAllOff() {
+  // Turn off all valves and pumps
   for (uint8_t i = 0; i < 10; i++) {
     workingValveState[i] = false;
   }
@@ -455,12 +571,19 @@ void turnAllOff() {
     workingPumpState[j] = false;
   }
   updateOutputsFromWorking();
+
+  // Reset operational states
+  isManualRunning = false;
+  manualScheduled = false;
+  autoRunning = false;
+
+  Serial.println("[SYSTEM] All relays turned off.");
 }
 
 // ======================
 // === UTILITY FUNCTIONS ===
 // ======================
-bool anyValveOpen() {
+bool isAnyValveOpen() {
   for (uint8_t i = 0; i < 10; i++) {
     if (workingValveState[i]) return true;
   }
@@ -475,48 +598,196 @@ bool anySavedValveOpen() {
 }
 
 bool nowInTimeRange(const TimeHM &from, const TimeHM &to) {
-  TimeHM nowHM = getCurrentTimeHM();
-  uint16_t nowMinutes = nowHM.hour * 60 + nowHM.minute;
-  uint16_t fromMinutes = from.hour * 60 + from.minute;
-  uint16_t toMinutes   = to.hour * 60 + to.minute;
+  TimeHM now = getCurrentTimeHM();
+
+  // Convert all to minutes for easier comparison
+  int nowMinutes = now.hour * 60 + now.minute;
+  int fromMinutes = from.hour * 60 + from.minute;
+  int toMinutes = to.hour * 60 + to.minute;
+
   if (fromMinutes <= toMinutes) {
+    // Normal time range (e.g., 08:00 to 17:00)
     return (nowMinutes >= fromMinutes && nowMinutes <= toMinutes);
   } else {
-    // Khoảng wrap qua nửa đêm
+    // Time range spans midnight (e.g., 22:00 to 06:00)
     return (nowMinutes >= fromMinutes || nowMinutes <= toMinutes);
   }
 }
 
 TimeHM getCurrentTimeHM() {
-  time_t now;
-  struct tm timeInfo;
-  time(&now);
-  localtime_r(&now, &timeInfo);
-  TimeHM result;
-  result.hour = timeInfo.tm_hour;
-  result.minute = timeInfo.tm_min;
-  return result;
+  TimeHM currentTime = {0, 0};
+  struct tm timeinfo;
+
+  if (getLocalTime(&timeinfo)) {
+    currentTime.hour = timeinfo.tm_hour;
+    currentTime.minute = timeinfo.tm_min;
+  }
+
+  return currentTime;
+}
+
+bool nowMatchesManualTime() {
+  TimeHM now = getCurrentTimeHM();
+  return (now.hour == manualHour && now.minute == manualMin);
+}
+
+void checkPowerStatus() {
+  float current = readACS712Current();
+  Serial.print("[POWER] Current reading: ");
+  Serial.print(current, 2);
+  Serial.println(" A");
+
+  if (current < POWER_THRESHOLD_AMPS) {
+    Serial.println("[POWER] CAUTION: Power loss detected!");
+    turnAllOff();
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("MAT NGUON!");
+    lcd.setCursor(0, 1);
+    lcd.print("KIEM TRA NGUON DIEN");
+    delay(3000);
+
+    currentAppState = STATE_MAIN;
+    drawMainMenu();
+  }
+}
+
+void resetIRNumericInput() {
+  irNumericBuffer = 0;
+  irNumericDigits = 0;
 }
 
 // ======================
-// === OUTPUT UPDATES ===
+// === IRRIGATION HANDLERS ===
 // ======================
-void updateOutputsFromWorking() {
-  // Van
+void runManualIrrigation() {
+  Serial.println("[MANUAL] Starting manual irrigation cycle.");
+
+  // Set status flags
+  isManualRunning = true;
+  manualStartMillis = millis();
+
+  // Apply saved valve configuration
   for (uint8_t i = 0; i < 10; i++) {
-    // LOW = ON, HIGH = OFF
-    digitalWrite(relayValvePins[i], workingValveState[i] ? LOW : HIGH);
-    Blynk.virtualWrite(i, workingValveState[i] ? 1 : 0);
+    workingValveState[i] = savedValveState[i];
   }
-  // Kiểm tra nếu có van mở mới cho phép bơm
-  bool anyOpen = anyValveOpen();
-  // Bơm
-  for (uint8_t j = 0; j < 2; j++) {
-    if (!anyOpen) {
-      workingPumpState[j] = false;
+  updateOutputsFromWorking();
+
+  // Display status
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("TUOI THU CONG");
+  lcd.setCursor(0, 1);
+  lcd.print("DANG CHAY...");
+  lcd.setCursor(0, 2);
+  lcd.print("Thoi gian: ");
+  lcd.print(savedDelaySec);
+  lcd.print("s");
+}
+
+void runAutoIrrigation() {
+  // Check if within the configured time range
+  if (nowInTimeRange(savedAutoFrom, savedAutoTo)) {
+    if (!autoRunning) {
+      // Start the auto cycle
+      autoRunning = true;
+      autoCurrentValve = savedAutoStartIndex - 1;  // Convert to 0-9 index
+      autoStep = false;  // Start with valve step
+      autoLastActionMillis = millis();
+
+      // Display status
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("TU DONG BAT DAU");
+      delay(1500);
+      drawMainMenu();
     }
-    digitalWrite(relayPumpPins[j], workingPumpState[j] ? LOW : HIGH);
-    Blynk.virtualWrite(10 + j, workingPumpState[j] ? 1 : 0);
+
+    // Process the automatic irrigation sequence
+    if (autoRunning) {
+      // If in valve step (irrigating)
+      if (!autoStep) {
+        if (millis() - autoLastActionMillis >= ((uint32_t)savedDuration.hour * 3600UL + savedDuration.minute * 60UL) * 1000UL) {
+          // Valve duration complete, move to rest step
+          for (uint8_t i = 0; i < 10; i++) {
+            workingValveState[i] = false;
+          }
+          updateOutputsFromWorking();
+
+          autoStep = true;  // Switch to rest step
+          autoLastActionMillis = millis();
+
+          // Display status
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("TU DONG: NGHI");
+          lcd.setCursor(0, 1);
+          lcd.print("Thoi gian: ");
+          lcd.print(savedRest.hour > 0 ? String(savedRest.hour) + "h " : "");
+          lcd.print(savedRest.minute);
+          lcd.print("m");
+        }
+      }
+      // If in rest step
+      else {
+        if (millis() - autoLastActionMillis >= ((uint32_t)savedRest.hour * 3600UL + savedRest.minute * 60UL) * 1000UL) {
+          // Rest complete, move to next valve
+          autoCurrentValve = (autoCurrentValve + 1) % 10;  // Cycle through valves 0-9
+
+          // If we've gone full circle, restart from the configured start valve
+          if (autoCurrentValve == savedAutoStartIndex - 1) {
+            // We've completed a full cycle - check if we're still in the auto time range
+            if (!nowInTimeRange(savedAutoFrom, savedAutoTo)) {
+              autoRunning = false;
+              turnAllOff();
+
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("TU DONG KET THUC");
+              delay(2000);
+              drawMainMenu();
+              return;
+            }
+          }
+
+          // Turn on the next valve
+          for (uint8_t i = 0; i < 10; i++) {
+            workingValveState[i] = (i == autoCurrentValve);
+          }
+          updateOutputsFromWorking();
+
+          autoStep = false;  // Switch to valve step
+          autoLastActionMillis = millis();
+
+          // Display status
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("TU DONG: VAN ");
+          lcd.print(autoCurrentValve + 1);  // Display 1-10
+          lcd.setCursor(0, 1);
+          lcd.print("DANG CHAY...");
+          lcd.setCursor(0, 2);
+          lcd.print("Thoi gian: ");
+          lcd.print(savedDuration.hour > 0 ? String(savedDuration.hour) + "h " : "");
+          lcd.print(savedDuration.minute);
+          lcd.print("m");
+        }
+      }
+    }
+  }
+  // Outside auto time range
+  else if (autoRunning) {
+    autoRunning = false;
+    turnAllOff();
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("TU DONG NGOAI GIO");
+    lcd.setCursor(0, 1);
+    lcd.print("TAT TAT CA");
+    delay(2000);
+    drawMainMenu();
   }
 }
 
@@ -527,73 +798,84 @@ void drawMainMenu() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("MENU CHINH");
-  // Các lựa chọn: 0="CẤU HÌNH",1="THỦ CÔNG",2="TỰ ĐỘNG"
+
   const char *options[3] = {"CAU HINH", "THU CONG", "TU DONG"};
   for (uint8_t i = 0; i < 3; i++) {
     lcd.setCursor(0, i + 1);
-    if (i == mainMenuIndex) {
-      lcd.print(">");
-    } else {
-      lcd.print(" ");
-    }
+    lcd.print(i == mainMenuIndex ? ">" : " ");
+    lcd.print(options[i]);
+
+    // Show auto mode status if on the auto menu option
     if (i == 2) {
-      // Hiển thị trạng thái AUTO bên cạnh
-      lcd.print(options[i]);
       lcd.print(" (");
-      lcd.print(workingAutoEnabled ? "ON-" : "OFF-");
-      lcd.print(String(workingAutoStartIndex));
+      lcd.print(savedAutoEnabled ? "ON-" : "OFF-");
+      lcd.print(savedAutoStartIndex);
       lcd.print(")");
-    } else {
-      lcd.print(options[i]);
     }
   }
+
   currentAppState = STATE_MAIN;
 }
 
 void drawConfigMenu() {
   lcd.clear();
-  // Tiêu đề
-  if (currentConfigMode == MODE_ONOFF) {
-    lcd.setCursor(0, 0);
-    lcd.print("Mode 0: ON/OFF VAN");
-    // Hiển thị 3 mục/trang
-    uint8_t startIndex = configMenuPage * 3;
-    for (uint8_t row = 0; row < 3; row++) {
-      uint8_t idx = startIndex + row;
-      if (idx >= 10) break;
-      lcd.setCursor(0, row + 1);
-      if (row == configMenuIndex) lcd.print(">");
-      else lcd.print(" ");
-      lcd.print("BEC ");
-      lcd.print(String(idx + 1));
-      lcd.print(": [");
-      lcd.print(workingValveState[idx] ? "ON " : "OFF");
-      lcd.print("]");
-    }
-    // Mũi tên lên nếu vẫn còn trang trước
-    if (configMenuPage > 0) {
-      lcd.setCursor(18, 1);
-      lcd.print("^");
-    }
-    // Mũi tên xuống nếu còn trang sau
-    if ((configMenuPage + 1) * 3 < 10) {
-      lcd.setCursor(18, 3);
-      lcd.print("v");
-    }
-  } else if (currentConfigMode == MODE_DELAY) {
-    lcd.setCursor(0, 0);
-    lcd.print("Mode 1: DELAY VAN");
-    lcd.setCursor(0, 1);
-    lcd.print("DELAY: ");
-    lcd.print(String(workingDelaySec));
-    lcd.print("s");
-  } else if (currentConfigMode == MODE_POWERCHECK) {
-    lcd.setCursor(0, 0);
-    lcd.print("Mode 2: POWER CHECK");
-    lcd.setCursor(0, 1);
-    lcd.print("POWER CHECK: ");
-    lcd.print(workingPowerCheckEnabled ? "ON " : "OFF");
+
+  // Declare variables outside switch statement
+  uint8_t startIndex;
+
+  switch (currentConfigMode) {
+    case MODE_ONOFF:
+      lcd.setCursor(0, 0);
+      lcd.print("Mode 0: ON/OFF VAN");
+
+      // Show up to 3 valves per page
+      startIndex = configMenuPage * 3;
+      for (uint8_t row = 0; row < 3; row++) {
+        uint8_t valveIndex = startIndex + row;
+        if (valveIndex >= 10) break;  // Don't show beyond 10 valves
+
+        lcd.setCursor(0, row + 1);
+        lcd.print(row == configMenuIndex ? ">" : " ");
+        lcd.print("BEC ");
+        lcd.print(valveIndex + 1);  // Display as 1-10
+        lcd.print(": [");
+        lcd.print(workingValveState[valveIndex] ? "ON " : "OFF");
+        lcd.print("]");
+      }
+
+      // Show navigation arrows if needed
+      if (configMenuPage > 0) {
+        lcd.setCursor(18, 1);
+        lcd.print("^");
+      }
+      if ((configMenuPage + 1) * 3 < 10) {
+        lcd.setCursor(18, 3);
+        lcd.print("v");
+      }
+      break;
+
+    case MODE_DELAY:
+      lcd.setCursor(0, 0);
+      lcd.print("Mode 1: DELAY VAN");
+      lcd.setCursor(0, 1);
+      lcd.print("> DELAY: ");
+      lcd.print(workingDelaySec);
+      lcd.print(" giay");
+      break;
+
+    case MODE_POWERCHECK:
+      lcd.setCursor(0, 0);
+      lcd.print("Mode 2: POWER CHECK");
+      lcd.setCursor(0, 1);
+      lcd.print("> POWER CHECK: ");
+      lcd.print(workingPowerCheckEnabled ? "ON" : "OFF");
+      break;
   }
+
+  // Navigation help
+  lcd.setCursor(0, 3);
+  lcd.print("#:Luu *:Thoat <>:Mode");
+
   currentAppState = STATE_CONFIG;
 }
 
@@ -602,110 +884,203 @@ void drawManualMenu() {
   lcd.setCursor(0, 0);
   lcd.print("THU CONG");
   lcd.setCursor(0, 1);
-  // Hiển thị [HH:MM], phần đang chỉnh sẽ nhấp nháy
-  if (editingManualHour) {
-    lcd.print("[");
-    if (manualBlinkState) {
-      lcd.print("  ");
-    } else {
-      lcd.print(String(manualHour < 10 ? "0" : "") + String(manualHour));
-    }
-    lcd.print(":");
-    lcd.print(String(manualMin < 10 ? "0" : "") + String(manualMin));
-    lcd.print("]");
+
+  // Display [HH:MM] with blinking effect on the field being edited
+  lcd.print("[");
+
+  // Hours
+  if (editingManualHour && blinkState) {
+    lcd.print("  ");
   } else {
-    lcd.print("[");
-    lcd.print(String(manualHour < 10 ? "0" : "") + String(manualHour));
-    lcd.print(":");
-    if (manualBlinkState) {
-      lcd.print("  ");
-    } else {
-      lcd.print(String(manualMin < 10 ? "0" : "") + String(manualMin));
-    }
-    lcd.print("]");
+    if (manualHour < 10) lcd.print("0");
+    lcd.print(manualHour);
   }
+
+  lcd.print(":");
+
+  // Minutes
+  if (!editingManualHour && blinkState) {
+    lcd.print("  ");
+  } else {
+    if (manualMin < 10) lcd.print("0");
+    lcd.print(manualMin);
+  }
+
+  lcd.print("]");
+
+  // Show which field is being edited
+  lcd.setCursor(0, 2);
+  lcd.print("Dang chinh: ");
+  lcd.print(editingManualHour ? "GIO" : "PHUT");
+
+  // Instructions
+  lcd.setCursor(0, 3);
+  lcd.print("#:Luu  *:Thoat  OK:Doi");
+
   currentAppState = STATE_MANUAL;
 }
 
 void drawAutoMenu() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  if (workingAutoEnabled) {
-    lcd.print("TU DONG (ON-");
-    lcd.print(String(workingAutoStartIndex));
-    lcd.print(")");
-  } else {
-    lcd.print("TU DONG (OFF-");
-    lcd.print(String(workingAutoStartIndex));
-    lcd.print(")");
-  }
-  // Nếu đang ở giao diện chọn van
+
+  // Show status in title
+  lcd.print("TU DONG ");
+  lcd.print(savedAutoEnabled ? "(ON-" : "(OFF-");
+  lcd.print(savedAutoStartIndex);
+  lcd.print(")");
+
   if (inSelectValve) {
+    // Valve selection interface
     lcd.setCursor(0, 1);
-    lcd.print("SELECT VALVE: [");
-    lcd.print(String(workingAutoStartIndex));
+    lcd.print("> Chon Van Bat Dau:");
+    lcd.setCursor(0, 2);
+    lcd.print("  VAN: [");
+    lcd.print(workingAutoStartIndex);
     lcd.print("]");
+
+    // Instructions
+    lcd.setCursor(0, 3);
+    lcd.print("#:Luu  *:Huy");
     return;
   }
-  // Nếu đang ở giao diện chỉnh giờ
+
   if (inTimeSetup) {
+    // Time setup interface - FROM-TO on first row
     lcd.setCursor(0, 1);
     lcd.print("F[");
-    if (autoSelectField == 0 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingAutoFrom.hour < 10 ? "0" : "") + String(workingAutoFrom.hour));
+
+    // FROM hour
+    if (autoSelectField == 0 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingAutoFrom.hour < 10) lcd.print("0");
+      lcd.print(workingAutoFrom.hour);
+    }
+
     lcd.print(":");
-    if (autoSelectField == 1 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingAutoFrom.minute < 10 ? "0" : "") + String(workingAutoFrom.minute));
+
+    // FROM minute
+    if (autoSelectField == 1 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingAutoFrom.minute < 10) lcd.print("0");
+      lcd.print(workingAutoFrom.minute);
+    }
+
     lcd.print("]-T[");
-    if (autoSelectField == 2 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingAutoTo.hour < 10 ? "0" : "") + String(workingAutoTo.hour));
+
+    // TO hour
+    if (autoSelectField == 2 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingAutoTo.hour < 10) lcd.print("0");
+      lcd.print(workingAutoTo.hour);
+    }
+
     lcd.print(":");
-    if (autoSelectField == 3 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingAutoTo.minute < 10 ? "0" : "") + String(workingAutoTo.minute));
+
+    // TO minute
+    if (autoSelectField == 3 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingAutoTo.minute < 10) lcd.print("0");
+      lcd.print(workingAutoTo.minute);
+    }
+
     lcd.print("]");
+
+    // Duration-Rest on second row
     lcd.setCursor(0, 2);
     lcd.print("D[");
-    if (autoSelectField == 4 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingDuration.hour < 10 ? "0" : "") + String(workingDuration.hour));
+
+    // DURATION hour
+    if (autoSelectField == 4 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingDuration.hour < 10) lcd.print("0");
+      lcd.print(workingDuration.hour);
+    }
+
     lcd.print(":");
-    if (autoSelectField == 5 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingDuration.minute < 10 ? "0" : "") + String(workingDuration.minute));
+
+    // DURATION minute
+    if (autoSelectField == 5 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingDuration.minute < 10) lcd.print("0");
+      lcd.print(workingDuration.minute);
+    }
+
     lcd.print("]-R[");
-    if (autoSelectField == 6 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingRest.hour < 10 ? "0" : "") + String(workingRest.hour));
+
+    // REST hour
+    if (autoSelectField == 6 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingRest.hour < 10) lcd.print("0");
+      lcd.print(workingRest.hour);
+    }
+
     lcd.print(":");
-    if (autoSelectField == 7 && autoBlinkState) lcd.print("  ");
-    else lcd.print(String(workingRest.minute < 10 ? "0" : "") + String(workingRest.minute));
+
+    // REST minute
+    if (autoSelectField == 7 && blinkState) {
+      lcd.print("  ");
+    } else {
+      if (workingRest.minute < 10) lcd.print("0");
+      lcd.print(workingRest.minute);
+    }
+
     lcd.print("]");
+
+    // Instructions
+    lcd.setCursor(0, 3);
+    lcd.print("#:Luu *:Huy OK:Next");
     return;
   }
-  // Danh sách menu chính
+
+  // Main auto menu options
   const char *options[5] = {
-    "AUTO_ON", "AUTO_OFF", "RESET", "SELECT VALVE", "TIME SETUP"
+    "1. BAT TU DONG",
+    "2. TAT TU DONG",
+    "3. RESET",
+    "4. CHON VAN BAT DAU",
+    "5. CAI DAT THOI GIAN"
   };
-  uint8_t pageStart = autoMenuPage * autoMenuItemsOnPage;
-  uint8_t itemsOnPage = min(autoMenuItemsOnPage, (uint8_t)(autoMenuItems - pageStart));
-  for (uint8_t row = 0; row < itemsOnPage; row++) {
-    uint8_t idx = pageStart + row;
-    lcd.setCursor(0, row + 1);
-    if (row == (autoMenuSelectedIndex)) lcd.print(">");
-    else lcd.print(" ");
-    lcd.print(options[idx]);
+
+  // Calculate which page of options to show
+  uint8_t itemsPerPage = 3;
+  uint8_t totalPages = (5 + itemsPerPage - 1) / itemsPerPage;
+  uint8_t startItem = autoMenuPage * itemsPerPage;
+
+  // Fix the min() function type mismatch by casting
+  uint8_t itemsToDisplay = 5 - startItem;
+  uint8_t itemsOnThisPage = (itemsPerPage < itemsToDisplay) ? itemsPerPage : itemsToDisplay;
+
+  // Display the current page of menu items
+  for (uint8_t i = 0; i < itemsOnThisPage; i++) {
+    uint8_t itemIndex = startItem + i;
+    lcd.setCursor(0, i + 1);
+    lcd.print(itemIndex == autoMenuIndex ? ">" : " ");
+    lcd.print(options[itemIndex]);
   }
-  // Dấu cuộn trang
+
+  // Show navigation arrows if needed
   if (autoMenuPage > 0) {
     lcd.setCursor(18, 1);
     lcd.print("^");
   }
-  if ((autoMenuPage + 1) * autoMenuItemsOnPage < autoMenuItems) {
+  if (autoMenuPage < totalPages - 1) {
     lcd.setCursor(18, 3);
     lcd.print("v");
   }
+
   currentAppState = STATE_AUTO;
 }
 
 // ======================
-// === IR HANDLING ===
+// === IR INPUT HANDLING ===
 // ======================
 void handleIR(uint32_t code) {
   switch (currentAppState) {
@@ -729,403 +1104,480 @@ void handleIR(uint32_t code) {
 
 void handleMainIR(uint32_t code) {
   if (code == IR_CODE_UP) {
-    if (mainMenuIndex > 0) mainMenuIndex--;
-    else mainMenuIndex = 2;
+    mainMenuIndex = (mainMenuIndex == 0) ? 2 : mainMenuIndex - 1;
     drawMainMenu();
-  } else if (code == IR_CODE_DOWN) {
-    if (mainMenuIndex < 2) mainMenuIndex++;
-    else mainMenuIndex = 0;
+  }
+  else if (code == IR_CODE_DOWN) {
+    mainMenuIndex = (mainMenuIndex + 1) % 3;
     drawMainMenu();
-  } else if (code == IR_CODE_OK) {
-    if (mainMenuIndex == 0) {
-      // CONFIG
-      currentConfigMode = MODE_ONOFF;
-      configMenuPage = 0;
-      configMenuIndex = 0;
-      drawConfigMenu();
-    } else if (mainMenuIndex == 1) {
-      // MANUAL
-      editingManualHour = true;
-      drawManualMenu();
-    } else if (mainMenuIndex == 2) {
-      // AUTO
-      autoMenuSelectedIndex = 0;
-      drawAutoMenu();
+  }
+  else if (code == IR_CODE_OK) {
+    switch (mainMenuIndex) {
+      case 0:  // Config
+        currentConfigMode = MODE_ONOFF;
+        configMenuPage = 0;
+        configMenuIndex = 0;
+        drawConfigMenu();
+        break;
+
+      case 1:  // Manual
+        editingManualHour = true;
+        manualHour = 0;
+        manualMin = 0;
+        drawManualMenu();
+        break;
+
+      case 2:  // Auto
+        autoMenuIndex = 0;
+        autoMenuPage = 0;
+        inSelectValve = false;
+        inTimeSetup = false;
+        drawAutoMenu();
+        break;
     }
   }
 }
 
 void handleConfigIR(uint32_t code) {
   if (currentConfigMode == MODE_ONOFF) {
-    uint8_t pageStart = configMenuPage * 3;
-    uint8_t itemsOnPage = min(3, 10 - pageStart);
+    uint8_t valvesPerPage = 3;
+    uint8_t totalValves = 10;
+    uint8_t totalPages = (totalValves + valvesPerPage - 1) / valvesPerPage;
+    uint8_t currentValveIndex = configMenuPage * valvesPerPage + configMenuIndex;
+
     if (code == IR_CODE_UP) {
       if (configMenuIndex > 0) {
         configMenuIndex--;
       } else if (configMenuPage > 0) {
         configMenuPage--;
-        itemsOnPage = min(3, 10 - configMenuPage * 3);
-        configMenuIndex = itemsOnPage - 1;
+        configMenuIndex = min(valvesPerPage - 1, totalValves - configMenuPage * valvesPerPage - 1);
       }
       drawConfigMenu();
-    } else if (code == IR_CODE_DOWN) {
-      if (configMenuIndex < itemsOnPage - 1) {
+    }
+    else if (code == IR_CODE_DOWN) {
+      if (configMenuIndex < min(valvesPerPage - 1, totalValves - configMenuPage * valvesPerPage - 1)) {
         configMenuIndex++;
-      } else if ((configMenuPage + 1) * 3 < 10) {
+      } else if (configMenuPage < totalPages - 1) {
         configMenuPage++;
         configMenuIndex = 0;
       }
       drawConfigMenu();
-    } else if (code == IR_CODE_LEFT) {
-      if (currentConfigMode == MODE_ONOFF) {
-        currentConfigMode = MODE_POWERCHECK;
-      } else if (currentConfigMode == MODE_DELAY) {
-        currentConfigMode = MODE_ONOFF;
-      } else if (currentConfigMode == MODE_POWERCHECK) {
-        currentConfigMode = MODE_DELAY;
-      }
-      drawConfigMenu();
-    } else if (code == IR_CODE_RIGHT) {
-      if (currentConfigMode == MODE_ONOFF) {
-        currentConfigMode = MODE_DELAY;
-      } else if (currentConfigMode == MODE_DELAY) {
-        currentConfigMode = MODE_POWERCHECK;
-      } else if (currentConfigMode == MODE_POWERCHECK) {
-        currentConfigMode = MODE_ONOFF;
-      }
-      drawConfigMenu();
-    } else if (code == IR_CODE_OK) {
-      uint8_t actualIndex = pageStart + configMenuIndex;
-      workingValveState[actualIndex] = !workingValveState[actualIndex];
-      drawConfigMenu();
-    } else if (code == IR_CODE_HASH) {
-      // Commit changes
-      memcpy(savedValveState, workingValveState, sizeof(savedValveState));
-      saveConfigToPrefs();
-      updateOutputsFromWorking();
-      drawMainMenu();
-    } else if (code == IR_CODE_STAR) {
-      // Cancel
-      memcpy(workingValveState, savedValveState, sizeof(savedValveState));
-      updateOutputsFromWorking();
-      drawMainMenu();
     }
-  } else if (currentConfigMode == MODE_DELAY) {
+    else if (code == IR_CODE_LEFT) {
+      currentConfigMode = MODE_POWERCHECK;
+      drawConfigMenu();
+    }
+    else if (code == IR_CODE_RIGHT) {
+      currentConfigMode = MODE_DELAY;
+      drawConfigMenu();
+    }
+    else if (code == IR_CODE_OK) {
+      if (currentValveIndex < totalValves) {
+        workingValveState[currentValveIndex] = !workingValveState[currentValveIndex];
+        drawConfigMenu();
+      }
+    }
+  }
+  else if (currentConfigMode == MODE_DELAY) {
     if (code == IR_CODE_UP) {
-      if (workingDelaySec < 65535) workingDelaySec++;
+      if (workingDelaySec < 10) {
+        workingDelaySec++;
+      } else if (workingDelaySec < 60) {
+        workingDelaySec += 5;
+      } else if (workingDelaySec < 300) {
+        workingDelaySec += 30;
+      } else {
+        workingDelaySec += 60;
+      }
+      if (workingDelaySec > 3600) workingDelaySec = 3600;  // Max 1 hour
       drawConfigMenu();
-    } else if (code == IR_CODE_DOWN) {
-      if (workingDelaySec > 1) workingDelaySec--;
+    }
+    else if (code == IR_CODE_DOWN) {
+      if (workingDelaySec > 300) {
+        workingDelaySec -= 60;
+      } else if (workingDelaySec > 60) {
+        workingDelaySec -= 30;
+      } else if (workingDelaySec > 10) {
+        workingDelaySec -= 5;
+      } else if (workingDelaySec > 1) {
+        workingDelaySec--;
+      }
       drawConfigMenu();
-    } else if (code == IR_CODE_HASH) {
-      savedDelaySec = workingDelaySec;
-      saveConfigToPrefs();
-      drawMainMenu();
-    } else if (code == IR_CODE_STAR) {
-      workingDelaySec = savedDelaySec;
-      drawMainMenu();
-    } else if (code == IR_CODE_LEFT) {
+    }
+    else if (code == IR_CODE_LEFT) {
       currentConfigMode = MODE_ONOFF;
       configMenuPage = 0;
       configMenuIndex = 0;
       drawConfigMenu();
-    } else if (code == IR_CODE_RIGHT) {
+    }
+    else if (code == IR_CODE_RIGHT) {
       currentConfigMode = MODE_POWERCHECK;
       drawConfigMenu();
     }
-  } else if (currentConfigMode == MODE_POWERCHECK) {
+  }
+  else if (currentConfigMode == MODE_POWERCHECK) {
     if (code == IR_CODE_OK) {
       workingPowerCheckEnabled = !workingPowerCheckEnabled;
       drawConfigMenu();
-    } else if (code == IR_CODE_HASH) {
-      savedPowerCheckEnabled = workingPowerCheckEnabled;
-      saveConfigToPrefs();
-      drawMainMenu();
-    } else if (code == IR_CODE_STAR) {
-      workingPowerCheckEnabled = savedPowerCheckEnabled;
-      drawMainMenu();
-    } else if (code == IR_CODE_LEFT) {
+    }
+    else if (code == IR_CODE_LEFT) {
       currentConfigMode = MODE_DELAY;
       drawConfigMenu();
-    } else if (code == IR_CODE_RIGHT) {
+    }
+    else if (code == IR_CODE_RIGHT) {
       currentConfigMode = MODE_ONOFF;
       configMenuPage = 0;
       configMenuIndex = 0;
       drawConfigMenu();
     }
   }
+
+  // Common actions for all config modes
+  if (code == IR_CODE_HASH) {
+    // Save configuration
+    for (uint8_t i = 0; i < 10; i++) {
+      savedValveState[i] = workingValveState[i];
+    }
+    savedDelaySec = workingDelaySec;
+    savedPowerCheckEnabled = workingPowerCheckEnabled;
+    saveConfigToPrefs();
+    updateOutputsFromWorking();
+
+    // Return to main menu
+    currentAppState = STATE_MAIN;
+    drawMainMenu();
+  }
+  else if (code == IR_CODE_STAR) {
+    // Cancel changes
+    for (uint8_t i = 0; i < 10; i++) {
+      workingValveState[i] = savedValveState[i];
+    }
+    workingDelaySec = savedDelaySec;
+    workingPowerCheckEnabled = savedPowerCheckEnabled;
+    updateOutputsFromWorking();
+
+    // Return to main menu
+    currentAppState = STATE_MAIN;
+    drawMainMenu();
+  }
 }
 
 void handleManualIR(uint32_t code) {
+  // Handle direct numeric input
+  if (code >= IR_CODE_0 && code <= IR_CODE_9) {
+    uint8_t num = 0;
+    if (code == IR_CODE_0) num = 0;
+    else if (code == IR_CODE_1) num = 1;
+    else if (code == IR_CODE_2) num = 2;
+    else if (code == IR_CODE_3) num = 3;
+    else if (code == IR_CODE_4) num = 4;
+    else if (code == IR_CODE_5) num = 5;
+    else if (code == IR_CODE_6) num = 6;
+    else if (code == IR_CODE_7) num = 7;
+    else if (code == IR_CODE_8) num = 8;
+    else if (code == IR_CODE_9) num = 9;
+
+    if (irNumericDigits == 0) {
+      irNumericBuffer = num;
+      irNumericDigits = 1;
+    } else {
+      irNumericBuffer = irNumericBuffer * 10 + num;
+      irNumericDigits = 2;
+    }
+
+    if (editingManualHour) {
+      if (irNumericBuffer > 23) {
+        irNumericBuffer = (irNumericDigits == 1) ? num : 23;
+      }
+      manualHour = irNumericBuffer;
+    } else {
+      if (irNumericBuffer > 59) {
+        irNumericBuffer = (irNumericDigits == 1) ? num : 59;
+      }
+      manualMin = irNumericBuffer;
+    }
+
+    if (irNumericDigits == 2) {
+      resetIRNumericInput();
+    }
+
+    drawManualMenu();
+    return;
+  }
+
+  // Reset numeric input on other keys
+  resetIRNumericInput();
+
+  // Handle other navigation and control keys
   if (code == IR_CODE_UP) {
     if (editingManualHour) {
-      if (manualHour < 99) manualHour++;
-      else manualHour = 0;
+      manualHour = (manualHour + 1) % 24;
     } else {
-      // minute step = 15
-      if (manualMin <= 45) manualMin += 15;
-      else manualMin = 0;
+      manualMin = (manualMin < 45) ? manualMin + 15 : 0;
     }
     drawManualMenu();
-  } else if (code == IR_CODE_DOWN) {
+  }
+  else if (code == IR_CODE_DOWN) {
     if (editingManualHour) {
-      if (manualHour > 0) manualHour--;
-      else manualHour = 99;
+      manualHour = (manualHour > 0) ? manualHour - 1 : 23;
     } else {
-      if (manualMin >= 15) manualMin -= 15;
-      else manualMin = 45;
+      manualMin = (manualMin >= 15) ? manualMin - 15 : 45;
     }
     drawManualMenu();
-  } else if (code == IR_CODE_OK) {
+  }
+  else if (code == IR_CODE_OK) {
     editingManualHour = !editingManualHour;
     drawManualMenu();
-  } else if (code == IR_CODE_HASH) {
-    // Schedule manual watering
-    uint32_t delayMs = (uint32_t)manualHour * 3600000UL + (uint32_t)manualMin * 60000UL;
-    nextManualMillis = millis() + delayMs;
-    manualScheduled = true;
-    drawMainMenu();
-  } else if (code == IR_CODE_STAR) {
+  }
+  else if (code == IR_CODE_HASH) {
+    // Schedule manual irrigation
+    if (anySavedValveOpen()) {
+      manualScheduled = true;
+      isManualRunning = false;
+
+      // Display confirmation
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("DA HEN GIO TU DONG");
+      lcd.setCursor(0, 1);
+      lcd.print("VAO LUC: ");
+      if (manualHour < 10) lcd.print("0");
+      lcd.print(manualHour);
+      lcd.print(":");
+      if (manualMin < 10) lcd.print("0");
+      lcd.print(manualMin);
+
+      // Show which valves will be activated
+      lcd.setCursor(0, 2);
+      lcd.print("Van tuoi: ");
+      String valveList = "";
+      for (uint8_t i = 0; i < 10; i++) {
+        if (savedValveState[i]) {
+          valveList += String(i+1) + " ";
+        }
+      }
+      lcd.setCursor(0, 3);
+      lcd.print(valveList);
+
+      delay(3000);
+      currentAppState = STATE_MAIN;
+      drawMainMenu();
+    } else {
+      // Error: No valves configured to ON
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("LOI: KHONG CO VAN");
+      lcd.setCursor(0, 1);
+      lcd.print("NAO DUOC BAT");
+      lcd.setCursor(0, 3);
+      lcd.print("Vao CAU HINH...");
+      delay(3000);
+
+      currentAppState = STATE_CONFIG;
+      currentConfigMode = MODE_ONOFF;
+      configMenuPage = 0;
+      configMenuIndex = 0;
+      drawConfigMenu();
+    }
+  }
+  else if (code == IR_CODE_STAR) {
+    // Cancel
+    currentAppState = STATE_MAIN;
     drawMainMenu();
   }
 }
 
 void handleAutoIR(uint32_t code) {
-  if (code == IR_CODE_STAR) {
-    if (inSelectValve || inTimeSetup) {
-      inSelectValve = false;
-      inTimeSetup = false;
-      drawAutoMenu();
-      return;
-    }
-    drawMainMenu();
-    currentAppState = STATE_MAIN;
-    return;
-  }
-  // Nếu đang ở giao diện chọn van
+  // Handle valve selection interface
   if (inSelectValve) {
     if (code == IR_CODE_UP) {
-      if (workingAutoStartIndex < 10) workingAutoStartIndex++;
-      else workingAutoStartIndex = 1;
+      if (workingAutoStartIndex < 10) {
+        workingAutoStartIndex++;
+      } else {
+        workingAutoStartIndex = 1;
+      }
       drawAutoMenu();
-    } else if (code == IR_CODE_DOWN) {
-      if (workingAutoStartIndex > 1) workingAutoStartIndex--;
-      else workingAutoStartIndex = 10;
+    }
+    else if (code == IR_CODE_DOWN) {
+      if (workingAutoStartIndex > 1) {
+        workingAutoStartIndex--;
+      } else {
+        workingAutoStartIndex = 10;
+      }
       drawAutoMenu();
-    } else if (code == IR_CODE_HASH) {
+    }
+    else if (code == IR_CODE_HASH) {
       savedAutoStartIndex = workingAutoStartIndex;
       saveConfigToPrefs();
       inSelectValve = false;
       drawAutoMenu();
-    } else if (code == IR_CODE_STAR || code == IR_CODE_LEFT) {
+    }
+    else if (code == IR_CODE_STAR) {
       workingAutoStartIndex = savedAutoStartIndex;
       inSelectValve = false;
       drawAutoMenu();
     }
     return;
   }
-  // Nếu đang ở giao diện chỉnh giờ
+
+  // Handle time setup interface
   if (inTimeSetup) {
     if (code == IR_CODE_OK) {
       autoSelectField = (autoSelectField + 1) % 8;
       drawAutoMenu();
-    } else if (code == IR_CODE_UP) {
-      switch (autoSelectField) {
-        case 0:
-          if (workingAutoFrom.hour < 23) workingAutoFrom.hour++;
-          else workingAutoFrom.hour = 0;
-          break;
-        case 1:
-          if (workingAutoFrom.minute < 45) workingAutoFrom.minute += 15;
-          else workingAutoFrom.minute = 0;
-          break;
-        case 2:
-          if (workingAutoTo.hour < 23) workingAutoTo.hour++;
-          else workingAutoTo.hour = 0;
-          break;
-        case 3:
-          if (workingAutoTo.minute < 45) workingAutoTo.minute += 15;
-          else workingAutoTo.minute = 0;
-          break;
-        case 4:
-          if (workingDuration.hour < 23) workingDuration.hour++;
-          else workingDuration.hour = 0;
-          break;
-        case 5:
-          if (workingDuration.minute < 45) workingDuration.minute += 15;
-          else workingDuration.minute = 0;
-          break;
-        case 6:
-          if (workingRest.hour < 23) workingRest.hour++;
-          else workingRest.hour = 0;
-          break;
-        case 7:
-          if (workingRest.minute < 45) workingRest.minute += 15;
-          else workingRest.minute = 0;
-          break;
-      }
-      drawAutoMenu();
-    } else if (code == IR_CODE_DOWN) {
-      switch (autoSelectField) {
-        case 0:
-          if (workingAutoFrom.hour > 0) workingAutoFrom.hour--;
-          else workingAutoFrom.hour = 23;
-          break;
-        case 1:
-          if (workingAutoFrom.minute >= 15) workingAutoFrom.minute -= 15;
-          else workingAutoFrom.minute = 45;
-          break;
-        case 2:
-          if (workingAutoTo.hour > 0) workingAutoTo.hour--;
-          else workingAutoTo.hour = 23;
-          break;
-        case 3:
-          if (workingAutoTo.minute >= 15) workingAutoTo.minute -= 15;
-          else workingAutoTo.minute = 45;
-          break;
-        case 4:
-          if (workingDuration.hour > 0) workingDuration.hour--;
-          else workingDuration.hour = 23;
-          break;
-        case 5:
-          if (workingDuration.minute >= 15) workingDuration.minute -= 15;
-          else workingDuration.minute = 45;
-          break;
-        case 6:
-          if (workingRest.hour > 0) workingRest.hour--;
-          else workingRest.hour = 23;
-          break;
-        case 7:
-          if (workingRest.minute >= 15) workingRest.minute -= 15;
-          else workingRest.minute = 45;
-          break;
-      }
-      drawAutoMenu();
-    } else if (code == IR_CODE_HASH) {
-      // Commit all time settings
-      savedAutoFrom = workingAutoFrom;
-      savedAutoTo   = workingAutoTo;
-      savedDuration = workingDuration;
-      savedRest     = workingRest;
-      saveConfigToPrefs();
-      inTimeSetup = false;
-      drawAutoMenu();
-    } else if (code == IR_CODE_STAR || code == IR_CODE_LEFT) {
-      // Revert
-      workingAutoFrom = savedAutoFrom;
-      workingAutoTo   = savedAutoTo;
-      workingDuration = savedDuration;
-      workingRest     = savedRest;
-      inTimeSetup = false;
-      drawAutoMenu();
+      return;
     }
-    return;
+    else if (code == IR_CODE_UP || code == IR_CODE_DOWN) {
+      int8_t change = (code == IR_CODE_UP) ? 1 : -1;
+
+      switch (autoSelectField) {
+        case 0:  // FROM hour
+          workingAutoFrom.hour = (workingAutoFrom.hour + change + 24) % 24;
+          break;
+        case 1:  // FROM minute
+          workingAutoFrom.minute = (workingAutoFrom.minute + change + 60) % 60;
+          break;
+        case 2:  // TO hour
+          workingAutoTo.hour = (workingAutoTo.hour + change + 24) % 24;
+          break;
+        case 3:  // TO minute
+          workingAutoTo.minute = (workingAutoTo.minute + change + 60) % 60;
+          break;
+        case 4:  // DURATION hour
+          workingDuration.hour = (workingDuration.hour + change + 24) % 24;
+          break;
+        case 5:  // DURATION minute
+          workingDuration.minute = (workingDuration.minute + change + 60) % 60;
+          break;
+        case 6:  // REST hour
+          workingRest.hour = (workingRest.hour + change + 24) % 24;
+          break;
+        case 7:  // REST minute
+          workingRest.minute = (workingRest.minute + change + 60) % 60;
+          break;
+      }
+
+      drawAutoMenu();
+      return;
+    }
+    else if (code == IR_CODE_HASH) {
+      // Save time settings
+      savedAutoFrom = workingAutoFrom;
+      savedAutoTo = workingAutoTo;
+      savedDuration = workingDuration;
+      savedRest = workingRest;
+      saveConfigToPrefs();
+
+      inTimeSetup = false;
+      drawAutoMenu();
+      return;
+    }
+    else if (code == IR_CODE_STAR) {
+      // Cancel changes
+      workingAutoFrom = savedAutoFrom;
+      workingAutoTo = savedAutoTo;
+      workingDuration = savedDuration;
+      workingRest = savedRest;
+
+      inTimeSetup = false;
+      drawAutoMenu();
+      return;
+    }
   }
-  // Xử lý menu chính auto
-  uint8_t pageStart = autoMenuPage * autoMenuItemsOnPage;
-  uint8_t itemsOnPage = min(autoMenuItemsOnPage, (uint8_t)(autoMenuItems - pageStart));
+
+  // Handle main auto menu
+  uint8_t itemsPerPage = 3;
+  uint8_t totalItems = 5;
+  uint8_t totalPages = (totalItems + itemsPerPage - 1) / itemsPerPage;
+  uint8_t currentItemIndex = autoMenuPage * itemsPerPage + autoMenuIndex;
+
   if (code == IR_CODE_UP) {
-    if (autoMenuSelectedIndex > 0) {
-      autoMenuSelectedIndex--;
+    if (autoMenuIndex > 0) {
+      autoMenuIndex--;
     } else if (autoMenuPage > 0) {
       autoMenuPage--;
-      itemsOnPage = min(autoMenuItemsOnPage, (uint8_t)(autoMenuItems - autoMenuPage * autoMenuItemsOnPage));
-      autoMenuSelectedIndex = itemsOnPage - 1;
+      autoMenuIndex = min(itemsPerPage - 1, totalItems - autoMenuPage * itemsPerPage - 1);
     }
     drawAutoMenu();
-  } else if (code == IR_CODE_DOWN) {
-    if (autoMenuSelectedIndex < itemsOnPage - 1) {
-      autoMenuSelectedIndex++;
-    } else if ((autoMenuPage + 1) * autoMenuItemsOnPage < autoMenuItems) {
+  }
+  else if (code == IR_CODE_DOWN) {
+    if (autoMenuIndex < min(itemsPerPage - 1, totalItems - autoMenuPage * itemsPerPage - 1)) {
+      autoMenuIndex++;
+    } else if (autoMenuPage < totalPages - 1) {
       autoMenuPage++;
-      autoMenuSelectedIndex = 0;
+      autoMenuIndex = 0;
     }
     drawAutoMenu();
-  } else if (code == IR_CODE_OK) {
-    uint8_t actualIndex = pageStart + autoMenuSelectedIndex;
-    if (actualIndex == 0) {
-      workingAutoEnabled = true;
-      savedAutoEnabled = true;
-      saveConfigToPrefs();
-      drawMainMenu();
-      currentAppState = STATE_MAIN;
-      return;
-    } else if (actualIndex == 1) {
-      workingAutoEnabled = false;
-      savedAutoEnabled = false;
-      saveConfigToPrefs();
-      drawMainMenu();
-      currentAppState = STATE_MAIN;
-      return;
-    } else if (actualIndex == 2) {
-      workingAutoEnabled = false;
-      savedAutoEnabled = false;
-      workingAutoStartIndex = 1;
-      savedAutoStartIndex = 1;
-      saveConfigToPrefs();
-      drawMainMenu();
-      currentAppState = STATE_MAIN;
-      return;
-    } else if (actualIndex == 3) {
-      inSelectValve = true;
-      drawAutoMenu();
-      return;
-    } else if (actualIndex == 4) {
-      inTimeSetup = true;
-      drawAutoMenu();
-      return;
+  }
+  else if (code == IR_CODE_OK) {
+    switch (currentItemIndex) {
+      case 0:  // Turn Auto ON
+        workingAutoEnabled = true;
+        savedAutoEnabled = true;
+        saveConfigToPrefs();
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("TU DONG: BAT");
+        lcd.setCursor(0, 1);
+        lcd.print("Van dau: ");
+        lcd.print(savedAutoStartIndex);
+        delay(2000);
+
+        currentAppState = STATE_MAIN;
+        drawMainMenu();
+        break;
+
+      case 1:  // Turn Auto OFF
+        workingAutoEnabled = false;
+        savedAutoEnabled = false;
+        saveConfigToPrefs();
+
+        // Stop any running auto operations
+        if (autoRunning) {
+          autoRunning = false;
+          turnAllOff();
+        }
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("TU DONG: TAT");
+        delay(2000);
+
+        currentAppState = STATE_MAIN;
+        drawMainMenu();
+        break;
+
+      case 2:  // Reset
+        workingAutoEnabled = false;
+        savedAutoEnabled = false;
+        workingAutoStartIndex = 1;
+        savedAutoStartIndex = 1;
+        saveConfigToPrefs();
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("TU DONG: RESET");
+        delay(2000);
+
+        currentAppState = STATE_MAIN;
+        drawMainMenu();
+        break;
+
+      case 3:  // Select Start Valve
+        inSelectValve = true;
+        drawAutoMenu();
+        break;
+
+      case 4:  // Time Setup
+        inTimeSetup = true;
+        autoSelectField = 0;  // Start with the first field (FROM hour)
+        drawAutoMenu();
+        break;
     }
   }
-}
-
-// ======================
-// === BLYNK CALLBACKS ===
-// ======================
-BLYNK_WRITE(V0) {
-  workingValveState[0] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V1) {
-  workingValveState[1] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V2) {
-  workingValveState[2] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V3) {
-  workingValveState[3] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V4) {
-  workingValveState[4] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V5) {
-  workingValveState[5] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V6) {
-  workingValveState[6] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V7) {
-  workingValveState[7] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V8) {
-  workingValveState[8] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V9) {
-  workingValveState[9] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V10) {
-  workingPumpState[0] = param.asInt();
-  updateOutputsFromWorking();
-}
-BLYNK_WRITE(V11) {
-  workingPumpState[1] = param.asInt();
-  updateOutputsFromWorking();
+  else if (code == IR_CODE_STAR) {
+    currentAppState = STATE_MAIN;
+    drawMainMenu();
+  }
 }
