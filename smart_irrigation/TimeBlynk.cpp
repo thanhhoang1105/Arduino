@@ -1,7 +1,7 @@
 #include "BlynkCredentials.h"
 #include "TimeBlynk.h"
 #include <Arduino.h>
-#include <BlynkSimpleEsp32.h> // Giữ dòng này
+#include <BlynkSimpleEsp32.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <time.h>
@@ -10,73 +10,33 @@
 
 namespace TimeBlynk
 {
-    // NTP settings
+    // ===========================
+    // Cấu hình NTP cho múi giờ Việt Nam (GMT+7)
+    // ===========================
     static const char *ntpServer = "pool.ntp.org";
-    static const long gmtOffset_sec = 7 * 3600; // GMT+7 (Vietnam)
+    static const long gmtOffset_sec = 7 * 3600; // GMT+7
     static const int daylightOffset_sec = 0;
 
-    // Blynk virtual pin handlers
-    BLYNK_WRITE(V1)
-    {
-        Hardware::setValve(0, param.asInt());
-        Config::setValveState(0, param.asInt());
-    }
-    BLYNK_WRITE(V2)
-    {
-        Hardware::setValve(1, param.asInt());
-        Config::setValveState(1, param.asInt());
-    }
-    BLYNK_WRITE(V3)
-    {
-        Hardware::setValve(2, param.asInt());
-        Config::setValveState(2, param.asInt());
-    }
-    BLYNK_WRITE(V4)
-    {
-        Hardware::setValve(3, param.asInt());
-        Config::setValveState(3, param.asInt());
-    }
-    BLYNK_WRITE(V5)
-    {
-        Hardware::setValve(4, param.asInt());
-        Config::setValveState(4, param.asInt());
-    }
-    BLYNK_WRITE(V6)
-    {
-        Hardware::setValve(5, param.asInt());
-        Config::setValveState(5, param.asInt());
-    }
-    BLYNK_WRITE(V7)
-    {
-        Hardware::setValve(6, param.asInt());
-        Config::setValveState(6, param.asInt());
-    }
-    BLYNK_WRITE(V8)
-    {
-        Hardware::setValve(7, param.asInt());
-        Config::setValveState(7, param.asInt());
-    }
-    BLYNK_WRITE(V9)
-    {
-        Hardware::setValve(8, param.asInt());
-        Config::setValveState(8, param.asInt());
-    }
-    BLYNK_WRITE(V10)
-    {
-        Hardware::setValve(9, param.asInt());
-        Config::setValveState(9, param.asInt());
-    }
-    BLYNK_WRITE(V11)
-    {
-        Hardware::setPump(0, param.asInt());
-        Config::setPumpState(0, param.asInt());
-    }
-    BLYNK_WRITE(V12)
-    {
-        Hardware::setPump(1, param.asInt());
-        Config::setPumpState(1, param.asInt());
-    }
+    // ===========================
+    // Xử lý các sự kiện từ Blynk (điều khiển van và bơm)
+    // ===========================
+    // Khi nhận tín hiệu từ app Blynk, cập nhật trạng thái van/bơm cả phần cứng lẫn cấu hình
+    BLYNK_WRITE(V1)  { Hardware::setValve(0, param.asInt());  Config::setValveState(0, param.asInt()); }
+    BLYNK_WRITE(V2)  { Hardware::setValve(1, param.asInt());  Config::setValveState(1, param.asInt()); }
+    BLYNK_WRITE(V3)  { Hardware::setValve(2, param.asInt());  Config::setValveState(2, param.asInt()); }
+    BLYNK_WRITE(V4)  { Hardware::setValve(3, param.asInt());  Config::setValveState(3, param.asInt()); }
+    BLYNK_WRITE(V5)  { Hardware::setValve(4, param.asInt());  Config::setValveState(4, param.asInt()); }
+    BLYNK_WRITE(V6)  { Hardware::setValve(5, param.asInt());  Config::setValveState(5, param.asInt()); }
+    BLYNK_WRITE(V7)  { Hardware::setValve(6, param.asInt());  Config::setValveState(6, param.asInt()); }
+    BLYNK_WRITE(V8)  { Hardware::setValve(7, param.asInt());  Config::setValveState(7, param.asInt()); }
+    BLYNK_WRITE(V9)  { Hardware::setValve(8, param.asInt());  Config::setValveState(8, param.asInt()); }
+    BLYNK_WRITE(V10) { Hardware::setValve(9, param.asInt());  Config::setValveState(9, param.asInt()); }
+    BLYNK_WRITE(V11) { Hardware::setPump(0, param.asInt());   Config::setPumpState(0, param.asInt()); }
+    BLYNK_WRITE(V12) { Hardware::setPump(1, param.asInt());   Config::setPumpState(1, param.asInt()); }
 
+    // ===========================
+    // Khởi tạo WiFi sử dụng WiFiManager
+    // ===========================
     void initializeWiFi()
     {
         Serial.println("[WIFI] Connecting to WiFi...");
@@ -84,9 +44,8 @@ namespace TimeBlynk
         Hardware::lcd.setCursor(0, 0);
         Hardware::lcd.print("KET NOI WIFI...");
 
-        // Use WiFiManager for easier WiFi setup
         WiFiManager wm;
-        wm.setConfigPortalTimeout(180); // Portal stays active for 3 minutes
+        wm.setConfigPortalTimeout(180); // Portal hoạt động 3 phút
 
         if (!wm.autoConnect("IrrigationSystem"))
         {
@@ -105,16 +64,19 @@ namespace TimeBlynk
         Hardware::lcd.print(WiFi.SSID());
     }
 
+    // ===========================
+    // Khởi tạo kết nối Blynk
+    // ===========================
     void initializeBlynk()
     {
         Hardware::lcd.setCursor(0, 2);
         Hardware::lcd.print("KET NOI BLYNK...");
 
-        // Initialize Blynk (sử dụng BLYNK_AUTH_TOKEN từ BlynkCredentials.h)
+        // Kết nối Blynk sử dụng token trong BlynkCredentials.h
         Blynk.config(BLYNK_AUTH_TOKEN);
 
-        // Thêm timeout khi kết nối
-        bool connected = Blynk.connect(30000); // 30 giây timeout
+        // Thử kết nối trong 30 giây
+        bool connected = Blynk.connect(30000);
 
         if (connected)
         {
@@ -129,16 +91,12 @@ namespace TimeBlynk
         delay(1000);
     }
 
+    // ===========================
+    // Khởi tạo đồng bộ thời gian NTP
+    // ===========================
     void initializeTime()
     {
-        // Đã thiết lập sẵn múi giờ Việt Nam (GMT+7)
-        static const long gmtOffset_sec = 7 * 3600; // GMT+7 (Vietnam)
-        static const int daylightOffset_sec = 0;
-
-        // Thiết lập đồng bộ NTP trong nền
         configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-        // Không hiển thị "CAI DAT GIO..." nữa
 
         struct tm timeinfo;
         if (getLocalTime(&timeinfo))
@@ -151,50 +109,46 @@ namespace TimeBlynk
         {
             Serial.println("[TIME] Đang sử dụng múi giờ mặc định (GMT+7)");
         }
-
-        // Không hiển thị "OK" hoặc "LOI" và không delay
     }
 
+    // ===========================
+    // Hàm khởi tạo toàn bộ hệ thống mạng, Blynk, thời gian
+    // ===========================
     void begin()
     {
         initializeWiFi();
         initializeBlynk();
         initializeTime();
 
-        // Sync Blynk with current valve and pump states
+        // Đồng bộ trạng thái van và bơm lên Blynk
         for (uint8_t i = 0; i < 10; i++)
-        {
             Blynk.virtualWrite(i, Config::getValveState(i) ? 1 : 0);
-        }
 
         for (uint8_t j = 0; j < 2; j++)
-        {
             Blynk.virtualWrite(10 + j, Config::getPumpState(j) ? 1 : 0);
-        }
     }
 
+    // ===========================
+    // Hàm update (dự phòng cho xử lý định kỳ nếu cần)
+    // ===========================
     void update()
     {
-        // This function can be used for additional periodic processing
-        // Currently, Blynk.run() is called in the main loop
+        // Hiện tại không xử lý gì thêm ở đây
     }
 
+    // ===========================
+    // Hàm chạy Blynk, tự động reconnect nếu mất kết nối
+    // ===========================
     void runBlynk()
     {
-        // Kiểm tra và kết nối lại nếu mất kết nối
         if (!Blynk.connected())
         {
             Serial.println("[BLYNK] Connection lost, reconnecting...");
             if (Blynk.connect(5000))
-            {
                 Serial.println("[BLYNK] Reconnected!");
-            }
             else
-            {
                 Serial.println("[BLYNK] Reconnection failed");
-            }
         }
-
         Blynk.run();
     }
 }

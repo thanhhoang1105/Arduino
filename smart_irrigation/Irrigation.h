@@ -3,10 +3,6 @@
 
 namespace Irrigation
 {
-  void update(); // gọi trong loop()
-  void runManual();
-  void runAuto();
-  bool nowMatchesManual();
-  bool nowInRange();
-  void scheduleManual(uint8_t hour, uint8_t minute);
+  // Hàm update: gọi trong loop(), hiện tại không còn xử lý gì vì chỉ giữ lại phần cấu hình
+  void update();
 }

@@ -4,112 +4,76 @@
 
 namespace Config
 {
-    // Các biến cấu hình
+    // Đối tượng Preferences để lưu/đọc dữ liệu vào bộ nhớ flash của ESP32
     static Preferences prefs;
 
-    // Valve states
+    // Mảng lưu trạng thái của 10 van tưới (true: bật, false: tắt)
     static bool valveState[10];
+
+    // Mảng lưu trạng thái của 2 bơm (true: bật, false: tắt)
     static bool pumpState[2];
 
-    // Other settings
+    // Thời gian delay giữa các van (đơn vị: giây)
     static uint16_t delaySec;
+
+    // Cờ bật/tắt chức năng kiểm tra nguồn điện
     static bool powerCheckEnabled;
 
-    // Auto mode settings
-    static bool autoEnabled;
-    static uint8_t autoStartIndex;
-
-    // Auto time settings
-    struct TimeHM
-    {
-        uint8_t hour;
-        uint8_t minute;
-    };
-
-    static TimeHM autoFrom, autoTo;
-    static TimeHM duration, rest;
-
+    // =========================
+    // Hàm load(): Đọc cấu hình từ flash
+    // =========================
     void load()
     {
-        prefs.begin("cfg", false); // Namespace for preferences
+        prefs.begin("cfg", false); // Mở vùng nhớ "cfg" để thao tác
 
-        // Valves
+        // Đọc trạng thái từng van từ flash, mặc định là OFF (false)
         for (uint8_t i = 0; i < 10; i++)
         {
             String key = "v" + String(i);
             valveState[i] = prefs.getBool(key.c_str(), false);
         }
 
-        // Pumps
+        // Đọc trạng thái từng bơm, mặc định là OFF (false)
         pumpState[0] = prefs.getBool("p0", false);
         pumpState[1] = prefs.getBool("p1", false);
 
-        // Delay
-        delaySec = prefs.getUInt("delay", 10); // Default 10s
+        // Đọc thời gian delay giữa các van, mặc định là 10 giây
+        delaySec = prefs.getUInt("delay", 10);
 
-        // Power Check
+        // Đọc trạng thái kiểm tra nguồn, mặc định là OFF (false)
         powerCheckEnabled = prefs.getBool("power", false);
-
-        // Auto mode
-        autoEnabled = prefs.getBool("ae", false);
-        autoStartIndex = prefs.getUInt("as", 1); // 1-10 for display
-
-        // Time settings
-        autoFrom.hour = prefs.getUInt("afh", 6); // 6:00 AM default
-        autoFrom.minute = prefs.getUInt("afm", 0);
-
-        autoTo.hour = prefs.getUInt("ath", 8); // 8:00 AM default
-        autoTo.minute = prefs.getUInt("atm", 0);
-
-        duration.hour = prefs.getUInt("adh", 0); // 5 minutes default
-        duration.minute = prefs.getUInt("adm", 5);
-
-        rest.hour = prefs.getUInt("arh", 0); // 1 minute default
-        rest.minute = prefs.getUInt("arm", 1);
 
         Serial.println("[PREFS] Configuration loaded.");
     }
 
+    // =========================
+    // Hàm save(): Lưu cấu hình hiện tại vào flash
+    // =========================
     void save()
     {
-        // Valves
+        // Lưu trạng thái từng van vào flash
         for (uint8_t i = 0; i < 10; i++)
         {
             String key = "v" + String(i);
             prefs.putBool(key.c_str(), valveState[i]);
         }
 
-        // Pumps
+        // Lưu trạng thái từng bơm vào flash
         prefs.putBool("p0", pumpState[0]);
         prefs.putBool("p1", pumpState[1]);
 
-        // Delay
+        // Lưu thời gian delay giữa các van
         prefs.putUInt("delay", delaySec);
 
-        // Power Check
+        // Lưu trạng thái kiểm tra nguồn
         prefs.putBool("power", powerCheckEnabled);
-
-        // Auto mode
-        prefs.putBool("ae", autoEnabled);
-        prefs.putUInt("as", autoStartIndex);
-
-        // Time settings
-        prefs.putUInt("afh", autoFrom.hour);
-        prefs.putUInt("afm", autoFrom.minute);
-
-        prefs.putUInt("ath", autoTo.hour);
-        prefs.putUInt("atm", autoTo.minute);
-
-        prefs.putUInt("adh", duration.hour);
-        prefs.putUInt("adm", duration.minute);
-
-        prefs.putUInt("arh", rest.hour);
-        prefs.putUInt("arm", rest.minute);
 
         Serial.println("[PREFS] Configuration saved.");
     }
 
-    // Valve getters & setters
+    // =========================
+    // Getter/Setter cho trạng thái van tưới
+    // =========================
     bool getValveState(uint8_t index)
     {
         if (index < 10)
@@ -123,7 +87,9 @@ namespace Config
             valveState[index] = state;
     }
 
-    // Pump getters & setters
+    // =========================
+    // Getter/Setter cho trạng thái bơm
+    // =========================
     bool getPumpState(uint8_t index)
     {
         if (index < 2)
@@ -137,7 +103,9 @@ namespace Config
             pumpState[index] = state;
     }
 
-    // Delay getter & setter
+    // =========================
+    // Getter/Setter cho thời gian delay giữa các van
+    // =========================
     uint16_t getDelaySec()
     {
         return delaySec;
@@ -148,7 +116,9 @@ namespace Config
         delaySec = value;
     }
 
-    // Power check getter & setter
+    // =========================
+    // Getter/Setter cho kiểm tra nguồn điện
+    // =========================
     bool getPowerCheckEnabled()
     {
         return powerCheckEnabled;
@@ -159,60 +129,26 @@ namespace Config
         powerCheckEnabled = enabled;
     }
 
-    // Auto mode getter & setter
-    bool getAutoEnabled()
-    {
-        return autoEnabled;
+    uint8_t getManualHour() {
+        prefs.begin("cfg", false);
+        uint8_t h = prefs.getUChar("manualHour", 0);
+        prefs.end();
+        return h;
     }
-
-    void setAutoEnabled(bool enabled)
-    {
-        autoEnabled = enabled;
+    void setManualHour(uint8_t hour) {
+        prefs.begin("cfg", false);
+        prefs.putUChar("manualHour", hour);
+        prefs.end();
     }
-
-    // Auto start index getter & setter
-    uint8_t getAutoStartIndex()
-    {
-        return autoStartIndex;
+    uint8_t getManualMinute() {
+        prefs.begin("cfg", false);
+        uint8_t m = prefs.getUChar("manualMinute", 0);
+        prefs.end();
+        return m;
     }
-
-    void setAutoStartIndex(uint8_t index)
-    {
-        if (index >= 1 && index <= 10)
-            autoStartIndex = index;
-    }
-
-    // Auto time getters & setters
-    uint8_t getAutoFromHour() { return autoFrom.hour; }
-    uint8_t getAutoFromMinute() { return autoFrom.minute; }
-    uint8_t getAutoToHour() { return autoTo.hour; }
-    uint8_t getAutoToMinute() { return autoTo.minute; }
-    uint8_t getDurationHour() { return duration.hour; }
-    uint8_t getDurationMinute() { return duration.minute; }
-    uint8_t getRestHour() { return rest.hour; }
-    uint8_t getRestMinute() { return rest.minute; }
-
-    void setAutoFromTime(uint8_t hour, uint8_t minute)
-    {
-        autoFrom.hour = hour % 24;
-        autoFrom.minute = minute % 60;
-    }
-
-    void setAutoToTime(uint8_t hour, uint8_t minute)
-    {
-        autoTo.hour = hour % 24;
-        autoTo.minute = minute % 60;
-    }
-
-    void setDurationTime(uint8_t hour, uint8_t minute)
-    {
-        duration.hour = hour % 24;
-        duration.minute = minute % 60;
-    }
-
-    void setRestTime(uint8_t hour, uint8_t minute)
-    {
-        rest.hour = hour % 24;
-        rest.minute = minute % 60;
+    void setManualMinute(uint8_t minute) {
+        prefs.begin("cfg", false);
+        prefs.putUChar("manualMinute", minute);
+        prefs.end();
     }
 }

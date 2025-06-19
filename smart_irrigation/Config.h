@@ -3,50 +3,49 @@
 
 namespace Config
 {
-  void load();
-  void save();
+    // ===========================
+    // Hàm khởi tạo và lưu cấu hình vào bộ nhớ flash
+    // ===========================
+    void load();   // Đọc cấu hình từ flash khi khởi động
+    void save();   // Lưu cấu hình hiện tại vào flash
 
-  // Valve getters/setters
-  bool getValveState(uint8_t index);
-  void setValveState(uint8_t index, bool state);
+    // ===========================
+    // Trạng thái van tưới (10 van)
+    // ===========================
+    // Lấy trạng thái của van tại vị trí index (true: bật, false: tắt)
+    bool getValveState(uint8_t index);
+    // Đặt trạng thái cho van tại vị trí index
+    void setValveState(uint8_t index, bool state);
 
-  // Pump getters/setters
-  bool getPumpState(uint8_t index);
-  void setPumpState(uint8_t index, bool state);
+    // ===========================
+    // Trạng thái bơm (2 bơm)
+    // ===========================
+    // Lấy trạng thái của bơm tại vị trí index (true: bật, false: tắt)
+    bool getPumpState(uint8_t index);
+    // Đặt trạng thái cho bơm tại vị trí index
+    void setPumpState(uint8_t index, bool state);
 
-  // Delay getter/setter
-  uint16_t getDelaySec();
-  void setDelaySec(uint16_t seconds);
+    // ===========================
+    // Thời gian delay giữa các van (giây)
+    // ===========================
+    // Lấy giá trị delay hiện tại (giây)
+    uint16_t getDelaySec();
+    // Đặt giá trị delay mới (giây)
+    void setDelaySec(uint16_t seconds);
 
-  // Power check getter/setter
-  bool getPowerCheckEnabled();
-  void setPowerCheckEnabled(bool enabled);
+    // ===========================
+    // Kiểm tra nguồn điện
+    // ===========================
+    // Lấy trạng thái kiểm tra nguồn điện (true: bật, false: tắt)
+    bool getPowerCheckEnabled();
+    // Đặt trạng thái kiểm tra nguồn điện
+    void setPowerCheckEnabled(bool enabled);
 
-  // Auto mode getters/setters
-  bool getAutoEnabled();
-  void setAutoEnabled(bool enabled);
-  uint8_t getAutoStartIndex();
-  void setAutoStartIndex(uint8_t index);
-
-  // Auto time range getters/setters
-  uint8_t getAutoFromHour();
-  void setAutoFromHour(uint8_t hour);
-  uint8_t getAutoFromMinute();
-  void setAutoFromMinute(uint8_t min);
-  uint8_t getAutoToHour();
-  void setAutoToHour(uint8_t hour);
-  uint8_t getAutoToMinute();
-  void setAutoToMinute(uint8_t min);
-
-  // Duration getters/setters
-  uint8_t getDurationHour();
-  void setDurationHour(uint8_t hour);
-  uint8_t getDurationMinute();
-  void setDurationMinute(uint8_t min);
-
-  // Rest time getters/setters
-  uint8_t getRestHour();
-  void setRestHour(uint8_t hour);
-  uint8_t getRestMinute();
-  void setRestMinute(uint8_t min);
+    // ===========================
+    // Thời gian thủ công (giờ, phút)
+    // ===========================
+    uint8_t getManualHour();
+    void setManualHour(uint8_t hour);
+    uint8_t getManualMinute();
+    void setManualMinute(uint8_t minute);
 }

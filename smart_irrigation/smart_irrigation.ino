@@ -1,8 +1,3 @@
-#define BLYNK_TEMPLATE_ID "TMPL6xy4mK0KN"
-#define BLYNK_TEMPLATE_NAME "Smart Irrigation Controller"
-#define BLYNK_AUTH_TOKEN "J34tRXWg_QTXt8bs0SfbZFSc1ARUpL0o"
-#define BLYNK_PRINT Serial
-
 #include "BlynkCredentials.h"
 #include <Arduino.h>
 #include "Hardware.h"
@@ -13,22 +8,28 @@
 #include "Irrigation.h"
 #include "Utils.h"
 
+// ===========================
+// Hàm setup(): Khởi tạo hệ thống
+// ===========================
 void setup()
 {
-    Serial.begin(115200);
-    delay(100);
-    Hardware::begin();
-    Config::load();
-    TimeBlynk::begin();
-    Display::drawMainMenu(0, Config::getAutoEnabled(), Config::getAutoStartIndex());
-    IRHandler::begin(15);
+    Serial.begin(115200);         // Khởi động Serial để debug
+    delay(100);                   // Đợi ổn định nguồn
+
+    Hardware::begin();            // Khởi tạo phần cứng: relay, LCD, cảm biến...
+    Config::load();               // Đọc cấu hình từ bộ nhớ flash
+    TimeBlynk::begin();           // Kết nối WiFi, Blynk, đồng bộ thời gian
+    Display::drawMainMenu(0, false, 1); // Hiển thị menu chính (chỉ còn mục cấu hình)
+    IRHandler::begin(15);         // Khởi tạo bộ thu IR trên chân số 15
 }
 
+// ===========================
+// Hàm loop(): Vòng lặp chính của chương trình
+// ===========================
 void loop()
 {
-    TimeBlynk::runBlynk(); // Thay vì gọi Blynk.run() trực tiếp
-    IRHandler::process();
-    Irrigation::update();
-    Display::updateBlink();
-    Utils::periodicTasks();
+    TimeBlynk::runBlynk();        // Duy trì kết nối và xử lý sự kiện Blynk
+    IRHandler::process();         // Xử lý tín hiệu từ remote IR
+    Irrigation::update();         // (Hiện tại không xử lý gì, dự phòng mở rộng)
+    Utils::periodicTasks();       // Thực hiện các tác vụ định kỳ (ví dụ: kiểm tra nguồn)
 }

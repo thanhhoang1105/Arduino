@@ -3,119 +3,210 @@
 #include <Arduino.h>
 #include "Display.h"
 #include "Config.h"
-#include "Irrigation.h"
+#include "Utils.h"
 
 namespace IRHandler
 {
-// IR Remote Control Codes
-#define IR_CODE_1 0xBA45FF00UL
-#define IR_CODE_2 0xB946FF00UL
-#define IR_CODE_3 0xB847FF00UL
-#define IR_CODE_4 0xBB44FF00UL
-#define IR_CODE_5 0xBF40FF00UL
-#define IR_CODE_6 0xBC43FF00UL
-#define IR_CODE_7 0xF807FF00UL
-#define IR_CODE_8 0xEA15FF00UL
-#define IR_CODE_9 0xF609FF00UL
-#define IR_CODE_0 0xE619FF00UL
+    // ===========================
+    // Định nghĩa mã phím điều khiển từ remote IR
+    // ===========================
+    #define IR_CODE_1 0xBA45FF00UL
+    #define IR_CODE_2 0xB946FF00UL
+    #define IR_CODE_3 0xB847FF00UL
+    #define IR_CODE_4 0xBB44FF00UL
+    #define IR_CODE_5 0xBF40FF00UL
+    #define IR_CODE_6 0xBC43FF00UL
+    #define IR_CODE_7 0xF807FF00UL
+    #define IR_CODE_8 0xEA15FF00UL
+    #define IR_CODE_9 0xF609FF00UL
+    #define IR_CODE_0 0xE619FF00UL
 
-#define IR_CODE_STAR 0xE916FF00UL // CANCEL / BACK
-#define IR_CODE_HASH 0xF20DFF00UL // SAVE / CONFIRM
+    #define IR_CODE_STAR 0xE916FF00UL // CANCEL / BACK
+    #define IR_CODE_HASH 0xF20DFF00UL // SAVE / CONFIRM
 
-#define IR_CODE_UP 0xE718FF00UL
-#define IR_CODE_DOWN 0xAD52FF00UL
-#define IR_CODE_RIGHT 0xA55AFF00UL
-#define IR_CODE_LEFT 0xF708FF00UL
-#define IR_CODE_OK 0xE31CFF00UL
+    #define IR_CODE_UP 0xE718FF00UL
+    #define IR_CODE_DOWN 0xAD52FF00UL
+    #define IR_CODE_RIGHT 0xA55AFF00UL
+    #define IR_CODE_LEFT 0xF708FF00UL
+    #define IR_CODE_OK 0xE31CFF00UL
 
-    // Menu state variables
+    // ===========================
+    // Biến trạng thái menu
+    // ===========================
     static uint8_t mainMenuIndex = 0;
 
+    // Biến lưu trạng thái tạm thời cho van
+    static bool tempValveState[10];
+    // Biến lưu trạng thái tạm thời cho delay
+    static uint16_t tempDelaySec = 0;
+    // Biến lưu trạng thái tạm thời cho kiểm tra nguồn điện
+    static bool tempPowerCheck = false;
+
+    // Tạo biến nhập số cho giờ và phút (static để giữ trạng thái)
+    static Utils::IRNumberInput hourInput = {0, 23};
+    static Utils::IRNumberInput minInput = {0, 59};
+
+    // Enum cho các chế độ cấu hình
     enum ConfigMode
     {
-        MODE_ONOFF,
-        MODE_DELAY,
-        MODE_POWERCHECK
+        MODE_ONOFF,     // Bật/tắt từng van
+        MODE_DELAY,     // Cài đặt thời gian delay giữa các van
+        MODE_POWERCHECK // Bật/tắt kiểm tra nguồn điện
     };
     static ConfigMode currentConfigMode = MODE_ONOFF;
-    static uint8_t configMenuPage = 0;
-    static uint8_t configMenuIndex = 0;
+    static uint8_t configMenuPage = 0;  // Trang hiện tại trong menu cấu hình (mỗi trang tối đa 3 van)
+    static uint8_t configMenuIndex = 0; // Vị trí chọn hiện tại trong trang
 
-    static uint8_t autoMenuIndex = 0;
-    static uint8_t autoMenuPage = 0;
-    static bool inSelectValve = false;
-    static bool inTimeSetup = false;
-    static uint8_t autoSelectField = 0;
-
-    static uint8_t manualHour = 0;
-    static uint8_t manualMin = 0;
-    static bool editingManualHour = true;
-
-    // For numeric input
-    static uint8_t irNumericBuffer = 0;
-    static uint8_t irNumericDigits = 0;
-
-    // Manual irrigation scheduling
-    static bool manualScheduled = false;
-
+    // ===========================
+    // Khởi tạo IR receiver
+    // ===========================
     void begin(uint8_t pin)
     {
         IrReceiver.begin(pin, ENABLE_LED_FEEDBACK);
     }
 
-    void resetNumericInput()
-    {
-        irNumericBuffer = 0;
-        irNumericDigits = 0;
-    }
-
+    // ===========================
+    // Xử lý phím trong menu chính
+    // ===========================
     void handleMainIR(uint32_t code)
     {
+        // Menu chính có 2 mục: 0 = CAU HINH, 1 = THU CONG
         if (code == IR_CODE_UP)
         {
-            mainMenuIndex = (mainMenuIndex == 0) ? 2 : mainMenuIndex - 1;
-            Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
+            if (mainMenuIndex > 0) mainMenuIndex--;
+            Display::drawMainMenu(mainMenuIndex, false, 1);
         }
         else if (code == IR_CODE_DOWN)
         {
-            mainMenuIndex = (mainMenuIndex + 1) % 3;
-            Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
+            if (mainMenuIndex < 1) mainMenuIndex++;
+            Display::drawMainMenu(mainMenuIndex, false, 1);
         }
         else if (code == IR_CODE_OK)
         {
-            switch (mainMenuIndex)
+            if (mainMenuIndex == 0)
             {
-            case 0: // Config
+                // Copy trạng thái van, delay, powerCheck từ Preferences vào vùng tạm
+                for (uint8_t i = 0; i < 10; i++)
+                    tempValveState[i] = Config::getValveState(i);
+                tempDelaySec = Config::getDelaySec();
+                tempPowerCheck = Config::getPowerCheckEnabled();
+
                 currentConfigMode = MODE_ONOFF;
                 configMenuPage = 0;
                 configMenuIndex = 0;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
-                break;
+                                        tempPowerCheck, tempDelaySec, tempValveState);
+            }
+            else if (mainMenuIndex == 1)
+            {
+                // Lấy giá trị từ Preferences
+                Display::manualHour = Config::getManualHour();
+                Display::manualMinute = Config::getManualMinute();
+                Display::editingManualHour = true;
 
-            case 1: // Manual
-                editingManualHour = true;
-                manualHour = 0;
-                manualMin = 0;
-                Display::drawManualMenu(manualHour, manualMin, editingManualHour);
-                break;
+                // Đồng bộ lại giá trị cho input struct và reset trạng thái nhập số
+                hourInput.value = Display::manualHour;
+                hourInput.inputCount = 0;
+                hourInput.lastInputMillis = 0;
+                minInput.value = Display::manualMinute;
+                minInput.inputCount = 0;
+                minInput.lastInputMillis = 0;
 
-            case 2: // Auto
-                autoMenuIndex = 0;
-                autoMenuPage = 0;
-                inSelectValve = false;
-                inTimeSetup = false;
-                Display::drawAutoMenu(autoMenuIndex, autoMenuPage, inSelectValve, inTimeSetup,
-                                      autoSelectField, Config::getAutoEnabled(), Config::getAutoStartIndex());
-                break;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, Display::editingManualHour);
             }
         }
     }
 
+    void handleManualIR(uint32_t code)
+    {
+        int numKey = -1;
+        if (code == IR_CODE_0) numKey = 0;
+        if (code == IR_CODE_1) numKey = 1;
+        if (code == IR_CODE_2) numKey = 2;
+        if (code == IR_CODE_3) numKey = 3;
+        if (code == IR_CODE_4) numKey = 4;
+        if (code == IR_CODE_5) numKey = 5;
+        if (code == IR_CODE_6) numKey = 6;
+        if (code == IR_CODE_7) numKey = 7;
+        if (code == IR_CODE_8) numKey = 8;
+        if (code == IR_CODE_9) numKey = 9;
+
+        unsigned long now = millis();
+
+        if (Display::editingManualHour)
+        {
+            if (numKey != -1) {
+                hourInput.maxValue = 23;
+                hourInput.processNumKey(numKey, now);
+                Display::manualHour = hourInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, true);
+                return;
+            }
+            if (code == IR_CODE_UP) {
+                hourInput.maxValue = 23;
+                hourInput.processUp();
+                Display::manualHour = hourInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, true);
+            }
+            else if (code == IR_CODE_DOWN) {
+                hourInput.maxValue = 23;
+                hourInput.processDown();
+                Display::manualHour = hourInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, true);
+            }
+            else if (code == IR_CODE_LEFT || code == IR_CODE_RIGHT) {
+                // Chuyển sang chỉnh phút
+                Display::editingManualHour = false;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, false);
+            }
+        }
+        else
+        {
+            if (numKey != -1) {
+                minInput.maxValue = 59;
+                minInput.processNumKey(numKey, now);
+                Display::manualMinute = minInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, false);
+                return;
+            }
+            if (code == IR_CODE_UP) {
+                minInput.maxValue = 59;
+                minInput.processMinuteUp();
+                Display::manualMinute = minInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, false);
+            }
+            else if (code == IR_CODE_DOWN) {
+                minInput.maxValue = 59;
+                minInput.processMinuteDown();
+                Display::manualMinute = minInput.value;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, false);
+            }
+            else if (code == IR_CODE_LEFT || code == IR_CODE_RIGHT) {
+                // Chuyển sang chỉnh giờ
+                Display::editingManualHour = true;
+                Display::drawManualMenu(Display::manualHour, Display::manualMinute, true);
+            }
+        }
+        if (code == IR_CODE_HASH) {
+            // Lưu giá trị giờ/phút vào Preferences
+            Config::setManualHour(Display::manualHour);
+            Config::setManualMinute(Display::manualMinute);
+            Display::drawMainMenu(1, false, 1);
+        }
+        else if (code == IR_CODE_STAR) {
+            // Thoát không lưu, không cần trả lại giá trị cũ
+            Display::drawMainMenu(1, false, 1);
+        }
+    }
+
+    // ===========================
+    // Xử lý phím trong menu cấu hình
+    // ===========================
     void handleConfigIR(uint32_t code)
     {
         if (currentConfigMode == MODE_ONOFF)
         {
+            // --- Điều khiển bật/tắt van ---
             uint8_t valvesPerPage = 3;
             uint8_t totalValves = 10;
             uint8_t totalPages = (totalValves + valvesPerPage - 1) / valvesPerPage;
@@ -123,6 +214,7 @@ namespace IRHandler
 
             if (code == IR_CODE_UP)
             {
+                // Di chuyển lên trong trang hoặc sang trang trước
                 if (configMenuIndex > 0)
                 {
                     configMenuIndex--;
@@ -133,10 +225,11 @@ namespace IRHandler
                     configMenuIndex = min(valvesPerPage - 1, totalValves - configMenuPage * valvesPerPage - 1);
                 }
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_DOWN)
             {
+                // Di chuyển xuống trong trang hoặc sang trang sau
                 if (configMenuIndex < min(valvesPerPage - 1, totalValves - configMenuPage * valvesPerPage - 1))
                 {
                     configMenuIndex++;
@@ -147,80 +240,62 @@ namespace IRHandler
                     configMenuIndex = 0;
                 }
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_LEFT)
             {
+                // Chuyển sang chế độ kiểm tra nguồn
                 currentConfigMode = MODE_POWERCHECK;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_RIGHT)
             {
+                // Chuyển sang chế độ delay
                 currentConfigMode = MODE_DELAY;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_OK)
             {
+                // Đảo trạng thái ON/OFF của van đang chọn (trên vùng tạm)
                 if (currentValveIndex < totalValves)
                 {
-                    bool currentState = Config::getValveState(currentValveIndex);
-                    Config::setValveState(currentValveIndex, !currentState);
+                    tempValveState[currentValveIndex] = !tempValveState[currentValveIndex];
                     Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                            Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                            tempPowerCheck, tempDelaySec, tempValveState);
                 }
             }
         }
         else if (currentConfigMode == MODE_DELAY)
         {
-            uint16_t delaySec = Config::getDelaySec();
-
             if (code == IR_CODE_UP)
             {
-                if (delaySec < 10)
-                {
-                    delaySec++;
-                }
-                else if (delaySec < 60)
-                {
-                    delaySec += 5;
-                }
-                else if (delaySec < 300)
-                {
-                    delaySec += 30;
-                }
+                if (tempDelaySec < 10)
+                    tempDelaySec++;
+                else if (tempDelaySec < 60)
+                    tempDelaySec += 5;
+                else if (tempDelaySec < 300)
+                    tempDelaySec += 30;
                 else
-                {
-                    delaySec += 60;
-                }
-                if (delaySec > 3600)
-                    delaySec = 3600; // Max 1 hour
-                Config::setDelaySec(delaySec);
+                    tempDelaySec += 60;
+                if (tempDelaySec > 3600)
+                    tempDelaySec = 3600;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), delaySec);
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_DOWN)
             {
-                if (delaySec > 300)
-                {
-                    delaySec -= 60;
-                }
-                else if (delaySec > 60)
-                {
-                    delaySec -= 30;
-                }
-                else if (delaySec > 10)
-                {
-                    delaySec -= 5;
-                }
-                else if (delaySec > 1)
-                {
-                    delaySec--;
-                }
-                Config::setDelaySec(delaySec);
+                if (tempDelaySec > 300)
+                    tempDelaySec -= 60;
+                else if (tempDelaySec > 60)
+                    tempDelaySec -= 30;
+                else if (tempDelaySec > 10)
+                    tempDelaySec -= 5;
+                else if (tempDelaySec > 1)
+                    tempDelaySec--;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), delaySec);
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_LEFT)
             {
@@ -228,28 +303,29 @@ namespace IRHandler
                 configMenuPage = 0;
                 configMenuIndex = 0;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_RIGHT)
             {
                 currentConfigMode = MODE_POWERCHECK;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
         }
         else if (currentConfigMode == MODE_POWERCHECK)
         {
+            // --- Bật/tắt kiểm tra nguồn điện ---
             if (code == IR_CODE_OK)
             {
-                Config::setPowerCheckEnabled(!Config::getPowerCheckEnabled());
+                tempPowerCheck = !tempPowerCheck;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_LEFT)
             {
                 currentConfigMode = MODE_DELAY;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (code == IR_CODE_RIGHT)
             {
@@ -257,167 +333,35 @@ namespace IRHandler
                 configMenuPage = 0;
                 configMenuIndex = 0;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        Config::getPowerCheckEnabled(), Config::getDelaySec());
+                                        tempPowerCheck, tempDelaySec, tempValveState);
             }
         }
 
-        // Common actions for all config modes
+        // --- Hành động chung cho mọi chế độ cấu hình ---
         if (code == IR_CODE_HASH)
         {
-            // Save configuration
+            // Lưu trạng thái tạm vào Preferences
+            for (uint8_t i = 0; i < 10; i++)
+                Config::setValveState(i, tempValveState[i]);
+            Config::setDelaySec(tempDelaySec);
+            Config::setPowerCheckEnabled(tempPowerCheck);
             Config::save();
-
-            // Return to main menu
-            Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
+            Display::drawMainMenu(mainMenuIndex, false, 1);
         }
         else if (code == IR_CODE_STAR)
         {
-            // Cancel changes
-            Config::load();
-
-            // Return to main menu
-            Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
+            // Thoát, không lưu, trả lại trạng thái gốc từ Preferences
+            for (uint8_t i = 0; i < 10; i++)
+                tempValveState[i] = Config::getValveState(i);
+            tempDelaySec = Config::getDelaySec();
+            tempPowerCheck = Config::getPowerCheckEnabled();
+            Display::drawMainMenu(mainMenuIndex, false, 1);
         }
     }
 
-    void handleManualIR(uint32_t code)
-    {
-        // Handle direct numeric input
-        if (code >= IR_CODE_0 && code <= IR_CODE_9)
-        {
-            uint8_t num = 0;
-            if (code == IR_CODE_0)
-                num = 0;
-            else if (code == IR_CODE_1)
-                num = 1;
-            else if (code == IR_CODE_2)
-                num = 2;
-            else if (code == IR_CODE_3)
-                num = 3;
-            else if (code == IR_CODE_4)
-                num = 4;
-            else if (code == IR_CODE_5)
-                num = 5;
-            else if (code == IR_CODE_6)
-                num = 6;
-            else if (code == IR_CODE_7)
-                num = 7;
-            else if (code == IR_CODE_8)
-                num = 8;
-            else if (code == IR_CODE_9)
-                num = 9;
-
-            if (irNumericDigits == 0)
-            {
-                irNumericBuffer = num;
-                irNumericDigits = 1;
-            }
-            else
-            {
-                irNumericBuffer = irNumericBuffer * 10 + num;
-                irNumericDigits = 2;
-            }
-
-            if (editingManualHour)
-            {
-                if (irNumericBuffer > 23)
-                {
-                    irNumericBuffer = (irNumericDigits == 1) ? num : 23;
-                }
-                manualHour = irNumericBuffer;
-            }
-            else
-            {
-                if (irNumericBuffer > 59)
-                {
-                    irNumericBuffer = (irNumericDigits == 1) ? num : 59;
-                }
-                manualMin = irNumericBuffer;
-            }
-
-            if (irNumericDigits == 2)
-            {
-                resetNumericInput();
-            }
-
-            Display::drawManualMenu(manualHour, manualMin, editingManualHour);
-            return;
-        }
-
-        // Reset numeric input on other keys
-        resetNumericInput();
-
-        // Handle other navigation and control keys
-        if (code == IR_CODE_UP)
-        {
-            if (editingManualHour)
-            {
-                manualHour = (manualHour + 1) % 24;
-            }
-            else
-            {
-                // Tăng phút theo bội số của 15
-                manualMin = (manualMin + 15) % 60;
-                if (manualMin > 45)
-                {
-                    manualMin = 0;
-                }
-            }
-            Display::drawManualMenu(manualHour, manualMin, editingManualHour);
-        }
-        else if (code == IR_CODE_DOWN)
-        {
-            if (editingManualHour)
-            {
-                manualHour = (manualHour > 0) ? manualHour - 1 : 23;
-            }
-            else
-            {
-                // Giảm phút theo bội số của 15
-                if (manualMin < 15)
-                {
-                    manualMin = 0;
-                }
-                else
-                {
-                    manualMin = manualMin - 15;
-                }
-            }
-            Display::drawManualMenu(manualHour, manualMin, editingManualHour);
-        }
-        else if (code == IR_CODE_OK)
-        {
-            if (editingManualHour)
-            {
-                // Chuyển từ chỉnh giờ sang chỉnh phút
-                editingManualHour = false;
-                Display::drawManualMenu(manualHour, manualMin, editingManualHour);
-            }
-            else
-            {
-                // Nếu đang chỉnh phút và bấm OK thì khởi chạy ngay
-                Irrigation::runManual();
-            }
-        }
-        else if (code == IR_CODE_HASH)
-        {
-            // Chạy chế độ thủ công ngay lập tức khi ấn #
-            Irrigation::runManual();
-        }
-        else if (code == IR_CODE_STAR)
-        {
-            // Quay lại
-            Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
-        }
-    }
-
-    void handleAutoIR(uint32_t code)
-    {
-        // TODO: Implement Auto IR handling
-        // This is complex and would require significant code
-        // Consider implementing key parts as needed
-    }
-
+    // ===========================
+    // Hàm xử lý tín hiệu IR tổng
+    // ===========================
     void process()
     {
         if (IrReceiver.decode())
@@ -439,15 +383,12 @@ namespace IRHandler
                 case STATE_MANUAL:
                     handleManualIR(irCode);
                     break;
-                case STATE_AUTO:
-                    handleAutoIR(irCode);
-                    break;
                 default:
-                    Display::drawMainMenu(mainMenuIndex, Config::getAutoEnabled(), Config::getAutoStartIndex());
+                    Display::drawMainMenu(mainMenuIndex, false, 1);
                     break;
                 }
             }
-            IrReceiver.resume(); // Ready for next IR signal
+            IrReceiver.resume(); // Sẵn sàng nhận tín hiệu IR tiếp theo
         }
     }
 }
