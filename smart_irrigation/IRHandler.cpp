@@ -85,7 +85,7 @@ namespace IRHandler
         {
             if (mainMenuIndex == 0)
             {
-                // Copy trạng thái van, delay, powerCheck từ Preferences vào vùng tạm
+                // LUÔN lấy lại từ Preferences vào vùng tạm khi vào menu cấu hình
                 for (uint8_t i = 0; i < 10; i++)
                     tempValveState[i] = Config::getValveState(i);
                 tempDelaySec = Config::getDelaySec();
@@ -95,7 +95,7 @@ namespace IRHandler
                 configMenuPage = 0;
                 configMenuIndex = 0;
                 Display::drawConfigMenu(currentConfigMode, configMenuPage, configMenuIndex,
-                                        tempPowerCheck, tempDelaySec, tempValveState);
+                                    tempPowerCheck, tempDelaySec, tempValveState);
             }
             else if (mainMenuIndex == 1)
             {
@@ -350,7 +350,7 @@ namespace IRHandler
         }
         else if (code == IR_CODE_STAR)
         {
-            // Thoát, không lưu, trả lại trạng thái gốc từ Preferences
+            // Huỷ bỏ, luôn copy lại từ Preferences vào vùng tạm
             for (uint8_t i = 0; i < 10; i++)
                 tempValveState[i] = Config::getValveState(i);
             tempDelaySec = Config::getDelaySec();
